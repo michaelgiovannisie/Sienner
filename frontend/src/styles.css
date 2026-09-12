@@ -1,0 +1,133 @@
+:root {
+  --ink: #23201b;
+  --muted: #6b6459;
+  --rule: #d9d4cb;
+  --paper: #faf8f4;
+  --accent: #1c6758;
+  --alarm: #9c3b2e;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font: 15px/1.55 ui-sans-serif, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+.page {
+  max-width: 940px;
+  margin: 0 auto;
+  padding: 40px 20px 64px;
+}
+
+.masthead h1 {
+  margin: 0;
+  font-size: 30px;
+  letter-spacing: -0.02em;
+}
+
+.tagline {
+  margin: 4px 0 28px;
+  color: var(--muted);
+}
+
+.controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  align-items: flex-end;
+  padding-bottom: 20px;
+  border-bottom: 1px solid var(--rule);
+}
+
+.controls label {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+
+.controls input {
+  font: inherit;
+  padding: 8px 10px;
+  border: 1px solid var(--rule);
+  border-radius: 5px;
+  background: #fff;
+  color: var(--ink);
+  min-width: 150px;
+}
+
+.controls button {
+  font: inherit;
+  padding: 9px 22px;
+  border: 0;
+  border-radius: 5px;
+  background: var(--accent);
+  color: #fff;
+  cursor: pointer;
+}
+
+.controls button:disabled { opacity: 0.55; cursor: default; }
+
+.headline {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 40px;
+  margin: 28px 0 10px;
+}
+
+.metric-label {
+  display: block;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+}
+
+.metric-value {
+  display: block;
+  font-size: 26px;
+  font-variant-numeric: tabular-nums;
+}
+
+.metric-value.small { font-size: 16px; }
+
+.disclaimer, .footnote {
+  color: var(--muted);
+  font-size: 13px;
+  margin: 6px 0;
+}
+
+.warning {
+  font-size: 13px;
+  color: var(--ink);
+  background: #fdf4e3;
+  border-left: 3px solid #c98a20;
+  padding: 8px 12px;
+  margin: 8px 0;
+}
+
+.error {
+  color: var(--alarm);
+  border-left: 3px solid var(--alarm);
+  padding: 8px 12px;
+  margin-top: 22px;
+}
+
+.chart {
+  margin: 18px 0 4px;
+  padding: 12px 8px 4px;
+  background: #fff;
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+}
+
+@media (max-width: 560px) {
+  .controls input { min-width: 0; width: 100%; }
+  .controls label { flex: 1 1 100%; }
+}

@@ -288,3 +288,47 @@ the live key, answering:
 - Are dividends ex-dated or pay-dated?
 - Is `adjDividend` already split-adjusted? Applying a split correction to an
   already-corrected dividend is quietly wrong on exactly the tickers that split.
+
+---
+
+## Running Stage 1a
+
+```bash
+cp .env.example .env          # set POSTGRES_PASSWORD and SIENNER_FMP_API_KEY
+docker compose up --build     # http://localhost
+```
+
+Caddy is the only published port. The backend is reachable at `backend:8000`
+inside the Compose network and nowhere else. `backend/migrations/001_stage1a.sql`
+is applied by the Postgres entrypoint on an empty data directory only — to
+re-apply it, `docker compose down -v`.
+
+To lift to the VPS: set `SITE_ADDRESS` to the hostname in `.env` and Caddy
+provisions TLS on its own. There is no certbot step.
+
+Backend without containers:
+
+```bash
+python -m venv .venv && . .venv/bin/activate
+pip install -e 'backend[dev]'
+cd backend && pytest                       # 67 tests, no key and no network needed
+uvicorn sienner.main:app --reload          # degrades to in-memory storage if
+                                           # Postgres is unreachable, and says so
+                                           # at /api/health
+cd frontend && npm install && npm run dev  # proxies /api to :8000
+```
+
+### What Stage 1a is not
+
+- **No adjustment.** `sienner/returns.py` computes `r_t` with `k = 1, D = 0`.
+  The signature is already the Stage 1b one, and passing it real corporate
+  actions raises rather than silently ignoring them.
+- **No `adjClose`.** The FMP adapter drops it. It is a Stage 1b reconciliation
+  input, never a source of truth.
+- **Universe check is shape-only.** `sienner/universe.py` cannot tell `BRK.B`
+  from `VOD.L` without an exchange lookup, so it allowlists US class suffixes
+  and rejects the rest. The securities table in Stage 1b replaces this.
+- **No pandera.** Hard-reject rules are enforced in `providers/base.py` and in
+  CHECK constraints; the soft-reject (quarantine) tier does not exist yet.
+- **Test fixtures are shaped, not recorded.** See
+  `backend/tests/fixtures/README.md`. Re-record them during the spike.

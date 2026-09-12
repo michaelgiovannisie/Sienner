@@ -1,0 +1,59 @@
+# Stage 1a stack: Postgres, FastAPI, Caddy-fronted React bundle.
+#
+# Deployment comes first in the stage plan because Compose + Caddy + Postgres +
+# secrets on a box is the only part of Stage 1 with unknown-unknowns in it.
+# Hitting that friction while the payload is one ticker means every failure is
+# unambiguously an infra failure.
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-sienner}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-sienner}
+    volumes:
+      - db_data:/var/lib/postgresql/data
+      # Applied only on an empty data directory. Stage 1b introduces a real
+      # migration runner; for two tables, initdb is honest about what it is.
+      - ./backend/migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-sienner} -d ${POSTGRES_DB:-sienner}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  backend:
+    build: ./backend
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      SIENNER_DATABASE_URL: postgresql://${POSTGRES_USER:-sienner}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-sienner}
+      SIENNER_FMP_API_KEY: ${SIENNER_FMP_API_KEY:-}
+      SIENNER_FMP_BASE_URL: ${SIENNER_FMP_BASE_URL:-https://financialmodelingprep.com}
+      SIENNER_FMP_HISTORICAL_PATH: ${SIENNER_FMP_HISTORICAL_PATH:-/api/v3/historical-price-full}
+    # Not published to the host. Caddy is the only way in.
+    expose:
+      - "8000"
+
+  web:
+    build: ./frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    environment:
+      SITE_ADDRESS: ${SITE_ADDRESS:-:80}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  db_data:
+  caddy_data:
+  caddy_config:

@@ -1,0 +1,21 @@
+# SITE_ADDRESS is ":80" locally and a hostname on the VPS. With a hostname,
+# Caddy provisions and renews TLS on its own - no certbot step in the deploy.
+{$SITE_ADDRESS::80} {
+	encode gzip
+
+	handle /api/* {
+		reverse_proxy backend:8000
+	}
+
+	handle {
+		root * /srv
+		try_files {path} /index.html
+		file_server
+	}
+
+	header {
+		X-Content-Type-Options nosniff
+		X-Frame-Options DENY
+		Referrer-Policy strict-origin-when-cross-origin
+	}
+}

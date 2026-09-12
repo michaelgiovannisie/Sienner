@@ -1,0 +1,10 @@
+{
+  "symbol": "AAPL",
+  "historical": [
+    {"date": "2024-01-08", "open": 182.09, "high": 185.60, "low": 181.50, "close": 185.56, "adjClose": 184.82, "volume": 59144470, "change": 3.47, "changePercent": 1.905},
+    {"date": "2024-01-05", "open": 181.99, "high": 182.76, "low": 180.17, "close": 181.18, "adjClose": 180.46, "volume": 62303300, "change": -0.81, "changePercent": -0.445},
+    {"date": "2024-01-04", "open": 182.15, "high": 183.09, "low": 180.88, "close": 181.91, "adjClose": 181.19, "volume": 71983570, "change": -0.24, "changePercent": -0.132},
+    {"date": "2024-01-03", "open": 184.22, "high": 185.88, "low": 183.43, "close": 184.25, "adjClose": 183.52, "volume": 58414460, "change": 0.03, "changePercent": 0.016},
+    {"date": "2024-01-02", "open": 187.15, "high": 188.44, "low": 183.89, "close": 185.64, "adjClose": 184.90, "volume": 82488700, "change": -1.51, "changePercent": -0.807}
+  ]
+}

@@ -97,7 +97,15 @@ def test_passing_actions_refuses_rather_than_silently_ignoring(bars_factory):
     """Handing this function real corporate actions in Stage 1a must fail loudly.
     Silently dropping them would produce a wrong number that looks right."""
     actions = pd.DataFrame(
-        [{"bar_date": date(2024, 1, 3), "split_ratio": 10.0, "cash_dividend": 0.0}]
+        [
+            {
+                "ex_date": date(2024, 1, 3),
+                "action_type": "split",
+                "split_ratio": 10.0,
+                "cash_dividend": None,
+                "provider_adj_dividend": None,
+            }
+        ]
     )
     with pytest.raises(NotImplementedError):
         to_daily_returns(bars_factory([100.0, 110.0, 99.0]), actions)

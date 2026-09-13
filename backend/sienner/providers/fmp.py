@@ -27,12 +27,21 @@ import pandas as pd
 
 from sienner.config import Settings, get_settings
 from sienner.providers.base import (
+    ACTION_CASH_DIVIDEND,
+    ACTION_SPLIT,
+    CORPORATE_ACTION_COLUMNS,
     MalformedProviderResponse,
     ProviderError,
     UnknownSymbolError,
+    empty_corporate_actions,
     empty_raw_bars,
     normalise_raw_bars,
 )
+
+#: Which provider field Sienner treats as the ex-date. Open spike question 2 is
+#: whether FMP's `date` on the dividend route is the ex-date or the pay-date.
+#: The assumption lives here, in one place, so the answer changes one line.
+_EX_DATE_FIELD = "date"
 
 # FMP field name -> our column name.
 _FIELD_MAP = {
@@ -156,3 +165,133 @@ class FMPProvider:
             )
         frame = pd.DataFrame(rows)
         return frame.loc[:, list(_FIELD_MAP)].rename(columns=_FIELD_MAP)
+
+    # -- corporate actions (Stage 1b) --------------------------------------
+
+    def fetch_corporate_actions(
+        self, ticker: str, start: date, end: date
+    ) -> pd.DataFrame:
+        """Splits and cash dividends, ex-dated, ascending.
+
+        Two calls, because FMP serves splits and dividends on separate routes.
+        Both are filtered to [start, end] here rather than relying on the
+        provider honouring from/to on these routes - it does not, consistently.
+
+        The date field is treated as the EX-DATE. That is the third open spike
+        question and this adapter's assumption is recorded in one place: the
+        _EX_DATE_FIELD constant below. If the spike finds FMP is pay-dating,
+        change that constant, not the call sites.
+        """
+        symbol = ticker.upper()
+        splits = self._fetch_actions(
+            self._settings.fmp_splits_path, symbol, kind=ACTION_SPLIT
+        )
+        dividends = self._fetch_actions(
+            self._settings.fmp_dividends_path, symbol, kind=ACTION_CASH_DIVIDEND
+        )
+
+        frame = pd.concat([splits, dividends], ignore_index=True)
+        if frame.empty:
+            return empty_corporate_actions()
+
+        in_window = (frame["ex_date"] >= start) & (frame["ex_date"] <= end)
+        frame = frame.loc[in_window]
+        if frame.empty:
+            return empty_corporate_actions()
+
+        frame = frame.sort_values(["ex_date", "action_type"], kind="stable")
+        return frame.reset_index(drop=True).loc[:, list(CORPORATE_ACTION_COLUMNS)]
+
+    def _fetch_actions(self, path: str, symbol: str, *, kind: str) -> pd.DataFrame:
+        if not self._settings.fmp_api_key:
+            raise ProviderError(
+                "SIENNER_FMP_API_KEY is not set; cannot reach the provider."
+            )
+        payload = self._get(
+            f"{path}/{symbol}",
+            params={"apikey": self._settings.fmp_api_key},
+            ticker=symbol,
+        )
+        rows = self._unwrap(payload, ticker=symbol)
+        if not rows:
+            return empty_corporate_actions()
+
+        parsed = (
+            self._parse_split(row, symbol) if kind == ACTION_SPLIT
+            else self._parse_dividend(row, symbol)
+            for row in rows
+        )
+        records = [record for record in parsed if record is not None]
+        if not records:
+            return empty_corporate_actions()
+
+        frame = pd.DataFrame(records)
+        frame["ex_date"] = pd.to_datetime(frame["ex_date"], errors="coerce").dt.date
+        if frame["ex_date"].isna().any():
+            raise MalformedProviderResponse(f"{symbol}: unparseable {kind} ex-date")
+        return frame
+
+    @staticmethod
+    def _parse_split(row: dict[str, Any], symbol: str) -> dict[str, Any] | None:
+        for field in (_EX_DATE_FIELD, "numerator", "denominator"):
+            if field not in row:
+                raise MalformedProviderResponse(
+                    f"{symbol}: split row missing '{field}'; got {sorted(row)[:8]}"
+                )
+        try:
+            numerator = float(row["numerator"])
+            denominator = float(row["denominator"])
+        except (TypeError, ValueError) as exc:
+            raise MalformedProviderResponse(
+                f"{symbol}: non-numeric split ratio on {row.get(_EX_DATE_FIELD)}"
+            ) from exc
+        if denominator == 0 or numerator <= 0:
+            raise MalformedProviderResponse(
+                f"{symbol}: nonsensical split {numerator}:{denominator} "
+                f"on {row.get(_EX_DATE_FIELD)}"
+            )
+        # A 10-for-1 split arrives as numerator=10, denominator=1 and the raw
+        # close drops by 10x, so k = numerator/denominator is the factor that
+        # puts C_t back on the prior day's scale.
+        return {
+            "ex_date": row[_EX_DATE_FIELD],
+            "action_type": ACTION_SPLIT,
+            "split_ratio": numerator / denominator,
+            "cash_dividend": None,
+            "provider_adj_dividend": None,
+        }
+
+    @staticmethod
+    def _parse_dividend(row: dict[str, Any], symbol: str) -> dict[str, Any] | None:
+        if _EX_DATE_FIELD not in row:
+            raise MalformedProviderResponse(
+                f"{symbol}: dividend row missing '{_EX_DATE_FIELD}'; got {sorted(row)[:8]}"
+            )
+        raw = row.get("dividend")
+        if raw in (None, "", 0, 0.0):
+            # FMP emits zero-value dividend rows. They are not events.
+            return None
+        try:
+            amount = float(raw)
+        except (TypeError, ValueError) as exc:
+            raise MalformedProviderResponse(
+                f"{symbol}: non-numeric dividend on {row.get(_EX_DATE_FIELD)}"
+            ) from exc
+        if amount <= 0:
+            return None
+
+        adjusted = row.get("adjDividend")
+        try:
+            adjusted = float(adjusted) if adjusted not in (None, "") else None
+        except (TypeError, ValueError):
+            adjusted = None
+
+        return {
+            "ex_date": row[_EX_DATE_FIELD],
+            "action_type": ACTION_CASH_DIVIDEND,
+            "split_ratio": None,
+            # `dividend` is the as-declared cash amount. `adjDividend` is carried
+            # for the spike's reconciliation and is NOT used to compute returns.
+            "cash_dividend": amount,
+            "provider_adj_dividend": adjusted,
+        }

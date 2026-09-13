@@ -33,22 +33,61 @@ class Settings(BaseSettings):
     allowed_exchanges: tuple[str, ...] = ("NYSE", "NASDAQ", "AMEX")
     base_currency: str = "USD"
 
+    # --- Provider: corporate action routes ---
+    fmp_splits_path: str = "/api/v3/historical-price-full/stock_split"
+    fmp_dividends_path: str = "/api/v3/historical-price-full/stock_dividend"
+
     # --- Return series ---
-    # Stage 1a computes a price return: the stub passes k=1, D=0. Flipping this
-    # to True in Stage 1b is what turns on the corporate-actions join.
-    dividends_reinvested_at_ex_date_close: bool = False
+    # The standard total-return convention: dividends reinvested at the close on
+    # the ex-date, no tax, no cash drag. Wrong for a taxable account, and the UI
+    # says so.
+    dividends_reinvested_at_ex_date_close: bool = True
+
+    # THE STAGE 1B BLOCKER.
+    #
+    # r_t = (C_t * k_t + D_t) / C_{t-1} - 1 scales the close by the split ratio
+    # but not the dividend. That is correct only if D_t is quoted in PRE-split
+    # per-share units. If the provider quotes it post-split, the correct form is
+    # (C_t + D_t) * k_t, and getting it backwards is quietly wrong on exactly
+    # the tickers that split.
+    #
+    # Not guessable. Run `python -m sienner.scripts.fmp_spike` against a live
+    # key, then set this to the answer. Until then apply_actions() refuses.
+    dividend_unit_convention: str = "unresolved"  # pre_split | post_split
+
+    # --- Validation, tier 2: quarantine and report ---
+    # A single-day |log return| above this is either bad data or a real event.
+    # Hard-failing on the real ones would block legitimate backtests, so these
+    # rows are flagged and surfaced, never silently dropped or propagated.
+    quarantine_abs_log_return: float = 0.5
+
+    # The generic threshold above is a 64.9% move, which sits ABOVE the
+    # signature of the failure mode it is best placed to catch: a missed 2:1
+    # split is -0.69 log and trips it, but a missed 3:2 is -0.405 and passes
+    # clean. So a move whose size matches a common split ratio, on a date with
+    # no corresponding corporate action, is its own rule.
+    split_shaped_move_ratios: tuple[float, ...] = (
+        4 / 3, 1.5, 2.0, 3.0, 4.0, 5.0, 7.0, 10.0, 20.0,
+    )
+    split_shaped_move_tolerance: float = 0.02  # relative
+    # Floor below which a move is too ordinary to attribute to a missed split.
+    split_shaped_move_min_abs_return: float = 0.20
+
+    # Gaps longer than this many sessions that the market calendar does not
+    # explain are quarantined.
+    market_calendar: str = "NYSE"
+    quarantine_gap_sessions: int = 1
 
     # --- Presentation ---
     equity_curve_base: float = 100.0
 
-    # --- Not yet consumed. Declared here so Stage 1b/1c wire them up rather
+    # --- Not yet consumed. Declared here so Stage 1c wires them up rather
     # --- than inventing a threshold at the call site.
     trading_days_per_year: int = 252
     risk_free_rate: float = 0.0
     max_tickers: int = 20
     weight_sum_tolerance: float = 1e-6
     forward_fill_limit_trading_days: int = 5
-    quarantine_abs_log_return: float = 0.5
 
     # --- API ---
     cors_allow_origins: tuple[str, ...] = ("http://localhost:5173",)

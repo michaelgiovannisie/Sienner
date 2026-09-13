@@ -106,6 +106,28 @@ export default function App() {
             </p>
           ))}
 
+          {data.quarantined && data.quarantined.length > 0 && (
+            <details className="quarantine">
+              <summary>
+                {data.quarantined.length} bar
+                {data.quarantined.length === 1 ? '' : 's'} quarantined
+              </summary>
+              <ul>
+                {data.quarantined.map((row) => (
+                  <li key={`${row.date}-${row.rule}`}>
+                    <code>{row.date}</code> <strong>{row.rule}</strong> &mdash;{' '}
+                    {row.detail}
+                  </li>
+                ))}
+              </ul>
+              <p className="footnote">
+                These bars are included in the series. They are flagged, not
+                removed &mdash; a large move is either bad data or a real event,
+                and the tool will not decide that for you.
+              </p>
+            </details>
+          )}
+
           <div className="chart">
             <ResponsiveContainer width="100%" height={380}>
               <LineChart data={data.points} margin={{ top: 8, right: 16, bottom: 8, left: 0 }}>

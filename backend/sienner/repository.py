@@ -1,11 +1,12 @@
-"""Persistence for raw bars and the coverage ledger.
+"""Persistence for raw bars, the coverage ledger, corporate actions and
+quarantine.
 
-Plain SQL over psycopg. No ORM: there are two tables in Stage 1a, the queries
-are the interesting part, and an ORM would hide the ON CONFLICT DO NOTHING that
-makes ingestion idempotent.
+Plain SQL over psycopg. No ORM: the queries are the interesting part, and an
+ORM would hide both the ON CONFLICT DO NOTHING that makes ingestion idempotent
+and the supersede dance that makes corrections auditable.
 
-BarRepository is a Protocol so the service can be exercised against the
-in-memory implementation in tests without a live Postgres.
+The Protocols let the service run against the in-memory implementation in tests
+without a live Postgres.
 """
 
 from __future__ import annotations
@@ -16,35 +17,99 @@ from typing import Protocol
 import pandas as pd
 
 from sienner.coverage import DateRange, merge_ranges
-from sienner.providers.base import RAW_BAR_COLUMNS, empty_raw_bars
+from sienner.providers.base import (
+    CORPORATE_ACTION_COLUMNS,
+    RAW_BAR_COLUMNS,
+    empty_corporate_actions,
+    empty_raw_bars,
+)
+
+QUARANTINE_COLUMNS: tuple[str, ...] = (
+    "ticker",
+    "bar_date",
+    "rule",
+    "detail",
+    "observed_value",
+    "threshold",
+)
 
 
-class BarRepository(Protocol):
-    def covered_ranges(self, ticker: str) -> list[DateRange]:
-        """Ranges already fetched for this ticker, merged."""
-        ...
+def empty_quarantine() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "ticker": pd.Series(dtype="object"),
+            "bar_date": pd.Series(dtype="object"),
+            "rule": pd.Series(dtype="object"),
+            "detail": pd.Series(dtype="object"),
+            "observed_value": pd.Series(dtype="float64"),
+            "threshold": pd.Series(dtype="float64"),
+        }
+    )
+
+
+def _action_value(row: dict) -> float | None:
+    """The value that decides whether an incoming action is a correction."""
+    if row.get("action_type") == "split":
+        return row.get("split_ratio")
+    return row.get("cash_dividend")
+
+
+def _same_value(left, right) -> bool:
+    if left is None or right is None:
+        return False
+    return float(left) == float(right)
+
+
+class Repository(Protocol):
+    # --- bars and coverage (Stage 1a) ---
+    def covered_ranges(self, ticker: str) -> list[DateRange]: ...
 
     def record_coverage(
         self, ticker: str, span: DateRange, *, source: str, bars_written: int
-    ) -> None:
-        ...
+    ) -> None: ...
 
     def write_bars(self, ticker: str, bars: pd.DataFrame, *, source: str) -> int:
         """Insert bars, ignoring any that already exist. Returns rows written."""
         ...
 
-    def read_bars(self, ticker: str, span: DateRange) -> pd.DataFrame:
-        """Bars within the closed interval, ascending by date."""
+    def read_bars(self, ticker: str, span: DateRange) -> pd.DataFrame: ...
+
+    # --- corporate actions and quarantine (Stage 1b) ---
+    def write_actions(self, ticker: str, actions: pd.DataFrame, *, source: str) -> int:
+        """Insert actions not already on file. Returns rows written.
+
+        A row whose (ticker, ex_date, action_type) already has an ACTIVE entry
+        with a DIFFERENT value is a correction: insert the new row and mark the
+        old one superseded. Never edit in place.
+        """
         ...
 
+    def read_actions(self, ticker: str, span: DateRange) -> pd.DataFrame:
+        """Active actions with ex-date in the closed interval, ascending."""
+        ...
 
-class InMemoryBarRepository:
-    """Reference implementation. Used by tests; also the fallback when no
-    DATABASE_URL is reachable, so the API can be exercised without Postgres."""
+    def write_quarantine(self, flags: pd.DataFrame) -> int:
+        """Record soft-validation failures. Idempotent per (ticker, date, rule)."""
+        ...
+
+    def read_quarantine(self, ticker: str, span: DateRange) -> pd.DataFrame: ...
+
+
+# Kept as an alias: Stage 1a code and tests refer to this name.
+BarRepository = Repository
+
+
+class InMemoryRepository:
+    """Reference implementation. Used by tests, and the fallback when Postgres
+    is unreachable so the API degrades instead of refusing to start."""
 
     def __init__(self) -> None:
         self._bars: dict[str, dict[date, dict]] = {}
         self._coverage: dict[str, list[DateRange]] = {}
+        self._actions: dict[str, list[dict]] = {}
+        self._quarantine: dict[tuple, dict] = {}
+
+    # --- bars and coverage ---
 
     def covered_ranges(self, ticker: str) -> list[DateRange]:
         return merge_ranges(list(self._coverage.get(ticker, [])))
@@ -67,21 +132,80 @@ class InMemoryBarRepository:
 
     def read_bars(self, ticker: str, span: DateRange) -> pd.DataFrame:
         store = self._bars.get(ticker, {})
-        rows = [
-            row
-            for key, row in sorted(store.items())
-            if span.start <= key <= span.end
-        ]
+        rows = [row for key, row in sorted(store.items()) if span.start <= key <= span.end]
         if not rows:
             return empty_raw_bars()
-        return pd.DataFrame(rows).loc[:, list(RAW_BAR_COLUMNS)]
+        return pd.DataFrame(rows).loc[:, list(RAW_BAR_COLUMNS)].reset_index(drop=True)
+
+    # --- corporate actions ---
+
+    def write_actions(self, ticker: str, actions: pd.DataFrame, *, source: str) -> int:
+        if actions.empty:
+            return 0
+        store = self._actions.setdefault(ticker, [])
+        written = 0
+        for row in actions.to_dict("records"):
+            key = (row["ex_date"], row["action_type"])
+            active = next(
+                (
+                    existing
+                    for existing in store
+                    if (existing["ex_date"], existing["action_type"]) == key
+                    and existing["superseded_by"] is None
+                ),
+                None,
+            )
+            if active is not None:
+                if _same_value(_action_value(active), _action_value(row)):
+                    continue  # already on file, unchanged
+                active["superseded_by"] = len(store)
+            store.append({**row, "source": source, "superseded_by": None})
+            written += 1
+        return written
+
+    def read_actions(self, ticker: str, span: DateRange) -> pd.DataFrame:
+        rows = [
+            row
+            for row in self._actions.get(ticker, [])
+            if row["superseded_by"] is None and span.start <= row["ex_date"] <= span.end
+        ]
+        if not rows:
+            return empty_corporate_actions()
+        frame = pd.DataFrame(rows).loc[:, list(CORPORATE_ACTION_COLUMNS)]
+        return frame.sort_values(["ex_date", "action_type"]).reset_index(drop=True)
+
+    # --- quarantine ---
+
+    def write_quarantine(self, flags: pd.DataFrame) -> int:
+        if flags.empty:
+            return 0
+        written = 0
+        for row in flags.to_dict("records"):
+            key = (row["ticker"], row["bar_date"], row["rule"])
+            if key in self._quarantine:
+                continue
+            self._quarantine[key] = row
+            written += 1
+        return written
+
+    def read_quarantine(self, ticker: str, span: DateRange) -> pd.DataFrame:
+        rows = [
+            row
+            for key, row in sorted(self._quarantine.items())
+            if key[0] == ticker and span.start <= key[1] <= span.end
+        ]
+        if not rows:
+            return empty_quarantine()
+        return pd.DataFrame(rows).loc[:, list(QUARANTINE_COLUMNS)].reset_index(drop=True)
 
 
-class PostgresBarRepository:
-    """psycopg-backed implementation against the Stage 1a schema."""
+class PostgresRepository:
+    """psycopg-backed implementation against migrations 001 and 002."""
 
     def __init__(self, pool) -> None:
         self._pool = pool
+
+    # --- bars and coverage ---
 
     def covered_ranges(self, ticker: str) -> list[DateRange]:
         with self._pool.connection() as conn:
@@ -139,7 +263,7 @@ class PostgresBarRepository:
                     """,
                     records,
                 )
-                return cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+                return max(cur.rowcount or 0, 0)
 
     def read_bars(self, ticker: str, span: DateRange) -> pd.DataFrame:
         with self._pool.connection() as conn:
@@ -159,3 +283,133 @@ class PostgresBarRepository:
             frame[column] = frame[column].astype("float64")
         frame["volume"] = frame["volume"].astype("int64")
         return frame
+
+    # --- corporate actions ---
+
+    def write_actions(self, ticker: str, actions: pd.DataFrame, *, source: str) -> int:
+        if actions.empty:
+            return 0
+        written = 0
+        with self._pool.connection() as conn:
+            for row in actions.to_dict("records"):
+                existing = conn.execute(
+                    """
+                    SELECT id, split_ratio, cash_dividend
+                      FROM corporate_actions
+                     WHERE ticker = %s AND ex_date = %s AND action_type = %s
+                       AND superseded_at IS NULL
+                    """,
+                    (ticker, row["ex_date"], row["action_type"]),
+                ).fetchone()
+
+                if existing is not None:
+                    current = existing[1] if row["action_type"] == "split" else existing[2]
+                    if _same_value(current, _action_value(row)):
+                        continue
+
+                # The correction path, in the only order the schema allows.
+                # The partial unique index on ACTIVE rows cannot be deferred, so
+                # the old row has to stop being active BEFORE the replacement is
+                # inserted; superseded_by is then backfilled once the new id
+                # exists. All three statements are one transaction, so the
+                # intermediate state is never visible.
+                if existing is not None:
+                    conn.execute(
+                        "UPDATE corporate_actions SET superseded_at = now() WHERE id = %s",
+                        (existing[0],),
+                    )
+
+                inserted = conn.execute(
+                    """
+                    INSERT INTO corporate_actions
+                           (ticker, ex_date, action_type, split_ratio,
+                            cash_dividend, provider_adj_dividend, source)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    RETURNING id
+                    """,
+                    (
+                        ticker,
+                        row["ex_date"],
+                        row["action_type"],
+                        row.get("split_ratio"),
+                        row.get("cash_dividend"),
+                        row.get("provider_adj_dividend"),
+                        source,
+                    ),
+                ).fetchone()[0]
+
+                if existing is not None:
+                    conn.execute(
+                        "UPDATE corporate_actions SET superseded_by = %s WHERE id = %s",
+                        (inserted, existing[0]),
+                    )
+                written += 1
+        return written
+
+    def read_actions(self, ticker: str, span: DateRange) -> pd.DataFrame:
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT ex_date, action_type, split_ratio, cash_dividend,
+                       provider_adj_dividend
+                  FROM corporate_actions_active
+                 WHERE ticker = %s AND ex_date BETWEEN %s AND %s
+                 ORDER BY ex_date, action_type
+                """,
+                (ticker, span.start, span.end),
+            ).fetchall()
+        if not rows:
+            return empty_corporate_actions()
+        frame = pd.DataFrame(rows, columns=list(CORPORATE_ACTION_COLUMNS))
+        for column in ("split_ratio", "cash_dividend", "provider_adj_dividend"):
+            frame[column] = pd.to_numeric(frame[column], errors="coerce")
+        return frame
+
+    # --- quarantine ---
+
+    def write_quarantine(self, flags: pd.DataFrame) -> int:
+        if flags.empty:
+            return 0
+        records = [
+            (
+                row["ticker"],
+                row["bar_date"],
+                row["rule"],
+                row["detail"],
+                row.get("observed_value"),
+                row.get("threshold"),
+            )
+            for row in flags.to_dict("records")
+        ]
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.executemany(
+                    """
+                    INSERT INTO quarantine
+                           (ticker, bar_date, rule, detail, observed_value, threshold)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (ticker, bar_date, rule) DO NOTHING
+                    """,
+                    records,
+                )
+                return max(cur.rowcount or 0, 0)
+
+    def read_quarantine(self, ticker: str, span: DateRange) -> pd.DataFrame:
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT ticker, bar_date, rule, detail, observed_value, threshold
+                  FROM quarantine
+                 WHERE ticker = %s AND bar_date BETWEEN %s AND %s
+                 ORDER BY bar_date, rule
+                """,
+                (ticker, span.start, span.end),
+            ).fetchall()
+        if not rows:
+            return empty_quarantine()
+        return pd.DataFrame(rows, columns=list(QUARANTINE_COLUMNS))
+
+
+# Names Stage 1a used, kept so nothing above this module had to change.
+InMemoryBarRepository = InMemoryRepository
+PostgresBarRepository = PostgresRepository

@@ -11,8 +11,12 @@ import pytest
 
 from sienner.config import Settings
 from sienner.coverage import DateRange
-from sienner.providers.base import ProviderError, empty_raw_bars
-from sienner.repository import InMemoryBarRepository
+from sienner.providers.base import (
+    ProviderError,
+    empty_corporate_actions,
+    empty_raw_bars,
+)
+from sienner.repository import InMemoryRepository
 from sienner.service import NoDataAvailable, SeriesService
 from sienner.universe import TickerRejected
 from tests.conftest import make_bars
@@ -23,9 +27,16 @@ class RecordingProvider:
 
     name = "recording"
 
-    def __init__(self, bars: pd.DataFrame | None = None, fail: bool = False) -> None:
+    def __init__(
+        self,
+        bars: pd.DataFrame | None = None,
+        fail: bool = False,
+        actions: pd.DataFrame | None = None,
+    ) -> None:
         self._bars = empty_raw_bars() if bars is None else bars
+        self._actions = empty_corporate_actions() if actions is None else actions
         self.calls: list[DateRange] = []
+        self.action_calls: list[DateRange] = []
         self.fail = fail
 
     def fetch_raw_bars(self, ticker: str, start: date, end: date) -> pd.DataFrame:
@@ -36,15 +47,25 @@ class RecordingProvider:
         mask = (frame["bar_date"] >= start) & (frame["bar_date"] <= end)
         return frame.loc[mask].reset_index(drop=True)
 
+    def fetch_corporate_actions(self, ticker: str, start: date, end: date) -> pd.DataFrame:
+        self.action_calls.append(DateRange(start, end))
+        if self.fail:
+            raise ProviderError("provider is down")
+        frame = self._actions
+        if frame.empty:
+            return frame
+        mask = (frame["ex_date"] >= start) & (frame["ex_date"] <= end)
+        return frame.loc[mask].reset_index(drop=True)
+
 
 @pytest.fixture
 def settings() -> Settings:
     return Settings(fmp_api_key="test-key")
 
 
-def build(bars: pd.DataFrame | None = None, *, fail: bool = False, settings=None):
-    provider = RecordingProvider(bars, fail=fail)
-    repository = InMemoryBarRepository()
+def build(bars: pd.DataFrame | None = None, *, fail: bool = False, settings=None, actions=None):
+    provider = RecordingProvider(bars, fail=fail, actions=actions)
+    repository = InMemoryRepository()
     return provider, repository, SeriesService(provider, repository, settings)
 
 
@@ -172,3 +193,85 @@ def test_empty_result_explains_why_rather_than_guessing(settings):
 
     with pytest.raises(NoDataAvailable, match="provider is down"):
         service.get_series("AAPL", date(2024, 1, 2), date(2024, 1, 4))
+
+
+# --- Stage 1b: actions, quarantine, and the spike gate ---------------------
+
+
+def _split_action(day: date, ratio: float) -> pd.DataFrame:
+    return pd.DataFrame(
+        [{"ex_date": day, "action_type": "split", "split_ratio": ratio,
+          "cash_dividend": None, "provider_adj_dividend": None}]
+    )
+
+
+def test_actions_are_fetched_and_stored_alongside_bars(settings):
+    bars = make_bars([100.0, 110.0, 99.0])
+    actions = _split_action(date(2024, 1, 3), 2.0)
+    provider, repository, service = build(bars, settings=settings, actions=actions)
+
+    service.get_series("AAPL", date(2024, 1, 2), date(2024, 1, 4))
+
+    assert provider.action_calls, "actions must be fetched in the same pass as bars"
+    stored = repository.read_actions("AAPL", DateRange(date(2024, 1, 2), date(2024, 1, 4)))
+    assert len(stored) == 1
+    assert float(stored["split_ratio"].iloc[0]) == 2.0
+
+
+def test_unresolved_convention_keeps_the_tool_working_and_says_why(settings):
+    """The spike gate. Storing actions is not the blocker; the arithmetic is.
+    The deployed tool must keep answering, as a price return, and must not
+    imply it is doing anything else."""
+    bars = make_bars([100.0, 110.0, 99.0])
+    actions = _split_action(date(2024, 1, 3), 2.0)
+    _, _, service = build(bars, settings=settings, actions=actions)
+
+    result = service.get_series("AAPL", date(2024, 1, 2), date(2024, 1, 4))
+
+    assert result.basis == "price_return"
+    assert any("NOT applied" in w for w in result.warnings)
+    assert any("spike" in w for w in result.warnings)
+
+
+def test_resolved_convention_attempts_total_return(settings):
+    """With the convention set, the service stops hedging and calls the real
+    path - which raises until apply_actions() is written. That is the intended
+    failure: it is loud, and it is the only thing left."""
+    bars = make_bars([100.0, 110.0, 99.0])
+    actions = _split_action(date(2024, 1, 3), 2.0)
+    resolved = Settings(fmp_api_key="k", dividend_unit_convention="pre_split")
+    _, _, service = build(bars, settings=resolved, actions=actions)
+
+    with pytest.raises(NotImplementedError):
+        service.get_series("AAPL", date(2024, 1, 2), date(2024, 1, 4))
+
+
+def test_quarantined_bars_are_surfaced_and_stored(settings):
+    """A 3:2-shaped drop with no action on file. Included in the series,
+    flagged in the response, recorded in storage."""
+    bars = make_bars([300.0, 200.0, 201.0])
+    _, repository, service = build(bars, settings=settings)
+
+    result = service.get_series("AAPL", date(2024, 1, 2), date(2024, 1, 4))
+
+    rules = {flag.rule for flag in result.quarantined}
+    assert "split_shaped_move" in rules
+    assert len(result.points) == 3, "a quarantined bar is flagged, not dropped"
+
+    stored = repository.read_quarantine(
+        "AAPL", DateRange(date(2024, 1, 2), date(2024, 1, 4))
+    )
+    assert len(stored) >= 1
+
+
+def test_re_running_does_not_duplicate_quarantine_rows(settings):
+    bars = make_bars([300.0, 200.0, 201.0])
+    _, repository, service = build(bars, settings=settings)
+    window = (date(2024, 1, 2), date(2024, 1, 4))
+
+    service.get_series("AAPL", *window)
+    first = len(repository.read_quarantine("AAPL", DateRange(*window)))
+    service.get_series("AAPL", *window)
+    second = len(repository.read_quarantine("AAPL", DateRange(*window)))
+
+    assert first == second

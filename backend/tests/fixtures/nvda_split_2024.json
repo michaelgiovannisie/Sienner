@@ -1,0 +1,16 @@
+{
+  "_comment": "NVDA 10-for-1 split, ex-date 2024-06-10. Closes are the real published raw closes to 2dp, which is what makes this a useful regression fixture: the 2024-06-10 close is ~1/10 of 2024-06-07 because the raw series is NOT back-adjusted. The dividend is the real $0.01 post-split quarterly. Re-record from a live key during the spike if you want exact intraday OHLC.",
+  "ticker": "NVDA",
+  "split": {"ex_date": "2024-06-10", "numerator": 10, "denominator": 1},
+  "bars": [
+    {"date": "2024-06-05", "open": 1150.00, "high": 1165.00, "low": 1145.00, "close": 1224.40, "volume": 60000000},
+    {"date": "2024-06-06", "open": 1225.00, "high": 1255.87, "low": 1222.00, "close": 1209.00, "volume": 55000000},
+    {"date": "2024-06-07", "open": 1210.00, "high": 1216.00, "low": 1180.00, "close": 1208.88, "volume": 48000000},
+    {"date": "2024-06-10", "open": 120.37, "high": 123.10, "low": 117.01, "close": 121.79, "volume": 310000000},
+    {"date": "2024-06-11", "open": 121.76, "high": 122.90, "low": 118.74, "close": 120.91, "volume": 220000000},
+    {"date": "2024-06-12", "open": 122.26, "high": 125.59, "low": 118.61, "close": 125.20, "volume": 250000000}
+  ],
+  "dividends": [
+    {"date": "2024-06-11", "dividend": 0.01, "adjDividend": 0.01}
+  ]
+}

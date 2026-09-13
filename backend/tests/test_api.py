@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 from sienner.config import Settings
 from sienner.deps import get_series_service
 from sienner.main import create_app
-from sienner.repository import InMemoryBarRepository
+from sienner.repository import InMemoryRepository
 from sienner.service import SeriesService
 from tests.conftest import make_bars
 from tests.test_service import RecordingProvider
@@ -21,18 +21,21 @@ from tests.test_service import RecordingProvider
 def client():
     app = create_app()
     provider = RecordingProvider(make_bars([100.0, 110.0, 99.0]))
-    service = SeriesService(provider, InMemoryBarRepository(), Settings(fmp_api_key="k"))
+    service = SeriesService(provider, InMemoryRepository(), Settings(fmp_api_key="k"))
     app.dependency_overrides[get_series_service] = lambda: service
     with TestClient(app) as test_client:
         yield test_client
 
 
-def test_health_reports_version_and_storage(client):
+def test_health_reports_version_storage_and_basis(client):
     body = client.get("/api/health").json()
 
     assert body["status"] == "ok"
     assert body["version"]
     assert body["storage"]
+    # While the spike is outstanding, health says so rather than implying the
+    # deployed tool is computing total returns.
+    assert "unresolved" in body["basis"]
 
 
 def test_series_returns_a_curve_indexed_to_100(client):

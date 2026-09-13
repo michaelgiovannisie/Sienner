@@ -27,6 +27,24 @@ RAW_BAR_COLUMNS: tuple[str, ...] = (
     "volume",
 )
 
+#: The declared shape of a corporate-actions frame. One row per action, with
+#: exactly one of split_ratio / cash_dividend populated.
+#:
+#: provider_adj_dividend is carried but NOT consumed: whether the provider's
+#: adjusted dividend is already split-adjusted is one of the open spike
+#: questions, and applying a split correction to an already-corrected dividend
+#: is quietly wrong on exactly the tickers that split.
+CORPORATE_ACTION_COLUMNS: tuple[str, ...] = (
+    "ex_date",
+    "action_type",
+    "split_ratio",
+    "cash_dividend",
+    "provider_adj_dividend",
+)
+
+ACTION_SPLIT = "split"
+ACTION_CASH_DIVIDEND = "cash_dividend"
+
 _NUMERIC_COLUMNS = ("open", "high", "low", "close")
 
 
@@ -57,12 +75,29 @@ class MarketDataProvider(Protocol):
         """
         ...
 
-    # Stage 1b adds, and nothing above this module changes shape:
-    #
-    # def fetch_corporate_actions(
-    #     self, ticker: str, start: date, end: date
-    # ) -> pd.DataFrame:
-    #     """Splits and cash dividends, ex-dated, ascending."""
+    def fetch_corporate_actions(
+        self, ticker: str, start: date, end: date
+    ) -> pd.DataFrame:
+        """Splits and cash dividends with ex-date in [start, end], ascending.
+
+        Columns are exactly CORPORATE_ACTION_COLUMNS. An empty frame means the
+        provider was asked and reported none, which is a different fact from
+        never having asked - the coverage ledger records the difference.
+        """
+        ...
+
+
+def empty_corporate_actions() -> pd.DataFrame:
+    """A correctly-typed zero-row actions frame."""
+    return pd.DataFrame(
+        {
+            "ex_date": pd.Series(dtype="object"),
+            "action_type": pd.Series(dtype="object"),
+            "split_ratio": pd.Series(dtype="float64"),
+            "cash_dividend": pd.Series(dtype="float64"),
+            "provider_adj_dividend": pd.Series(dtype="float64"),
+        }
+    )
 
 
 def empty_raw_bars() -> pd.DataFrame:

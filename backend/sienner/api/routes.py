@@ -5,9 +5,16 @@ from datetime import date
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from sienner import __version__
-from sienner.api.schemas import HealthOut, PointOut, RangeOut, SeriesOut
+from sienner.api.schemas import (
+    HealthOut,
+    PointOut,
+    QuarantineOut,
+    RangeOut,
+    SeriesOut,
+)
 from sienner.config import get_settings
 from sienner.deps import get_series_service, storage_kind
+from sienner.schemas import SchemaViolation
 from sienner.service import NoDataAvailable, SeriesService
 from sienner.universe import TickerRejected
 
@@ -21,6 +28,11 @@ def health() -> HealthOut:
         version=__version__,
         provider="fmp" if get_settings().fmp_api_key else "fmp (no key configured)",
         storage=storage_kind(),
+        basis=(
+            "price_return (dividend unit convention unresolved - run the FMP spike)"
+            if get_settings().dividend_unit_convention == "unresolved"
+            else "total_return"
+        ),
     )
 
 
@@ -37,6 +49,10 @@ def series(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except NoDataAvailable as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except SchemaViolation as exc:
+        # Cached data failed its declared schema. That is a server-side data
+        # problem, not a bad request - 422 would blame the caller.
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -52,5 +68,9 @@ def series(
         warnings=result.warnings,
         fetched_ranges=[
             RangeOut(start=r.start, end=r.end) for r in result.fetched_ranges
+        ],
+        quarantined=[
+            QuarantineOut(date=q.bar_date, rule=q.rule, detail=q.detail)
+            for q in result.quarantined
         ],
     )

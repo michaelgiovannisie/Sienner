@@ -311,24 +311,75 @@ Backend without containers:
 ```bash
 python -m venv .venv && . .venv/bin/activate
 pip install -e 'backend[dev]'
-cd backend && pytest                       # 67 tests, no key and no network needed
+cd backend && pytest                       # 108 pass, 3 xfail (blocked on the
+                                           # spike), 13 skip without Postgres.
+                                           # No key and no network needed.
 uvicorn sienner.main:app --reload          # degrades to in-memory storage if
                                            # Postgres is unreachable, and says so
                                            # at /api/health
 cd frontend && npm install && npm run dev  # proxies /api to :8000
 ```
 
-### What Stage 1a is not
+## Stage 1b status
 
-- **No adjustment.** `sienner/returns.py` computes `r_t` with `k = 1, D = 0`.
-  The signature is already the Stage 1b one, and passing it real corporate
-  actions raises rather than silently ignoring them.
-- **No `adjClose`.** The FMP adapter drops it. It is a Stage 1b reconciliation
-  input, never a source of truth.
+Built and tested: `corporate_actions` and `quarantine` tables, pandera schemas
+at every boundary, split and dividend fetch, the two-tier validation, the
+supersede correction path, and the spike script.
+
+**One function is unimplemented: `returns.apply_actions()`.** Everything else in
+1b is assembled around it. It refuses rather than guessing, because the
+dividend-unit question below is not answerable by reasoning:
+
+```
+pre_split    r_t = (C_t * k_t + D_t) / C_{t-1} - 1
+post_split   r_t = (C_t + D_t) * k_t / C_{t-1} - 1
+```
+
+These agree on every ticker that never split and diverge by the split factor on
+the ones that did. To resolve:
+
+```bash
+cd backend && python -m sienner.scripts.fmp_spike --ticker NVDA --ticker AAPL --ticker KO
+```
+
+The script answers all three README spike questions from data rather than
+documentation, prints its reasoning, writes `spike_verdict.json`, and ends with
+the `SIENNER_DIVIDEND_UNIT_CONVENTION` value to set. Then implement the matching
+branch in `apply_actions()`. The tests are already written: `tests/test_actions.py`
+marks them `xfail(strict=True)`, so they flip to passing and the strict marker
+fails the suite until someone removes it deliberately.
+
+Until the convention is set, the API keeps serving a **price return** and says
+so in `/api/health`, in the `basis` field, and in a per-request warning when
+actions exist but are not applied. Storing the actions was never the blocker;
+the arithmetic is.
+
+### Two decisions that changed during 1b
+
+**`r_t` is immutable against future actions, not against corrections.** A
+late-announced dividend or a restated ratio is a real event. `corporate_actions`
+therefore carries a supersede chain: a correction inserts the new row and marks
+the old one superseded, never edits in place. "Active" is keyed on
+`superseded_at`, not `superseded_by`, because a partial unique index cannot be
+deferred and keying it the other way deadlocks the correction against itself.
+That bug passed every in-memory test and was caught only against real Postgres;
+`tests/test_postgres_integration.py` now covers it.
+
+**The quarantine threshold grew a second rule.** At `|log return| > 0.5` (a
+64.9% move), a missed 2:1 split is −0.693 and trips it, but a missed 3:2 is
+−0.405 and passes clean — and a missed split is the most likely way for a return
+series to be wrong. So a move whose size matches a common split ratio, on a date
+with no corporate action on file, is now its own rule. The "no action on file"
+condition is what keeps the false-positive rate usable.
+
+### What is still not built
+
 - **Universe check is shape-only.** `sienner/universe.py` cannot tell `BRK.B`
   from `VOD.L` without an exchange lookup, so it allowlists US class suffixes
-  and rejects the rest. The securities table in Stage 1b replaces this.
-- **No pandera.** Hard-reject rules are enforced in `providers/base.py` and in
-  CHECK constraints; the soft-reject (quarantine) tier does not exist yet.
+  and rejects the rest. The `securities` table replaces this.
+- **Reconciliation against `adjClose`** exists inside the spike script but is
+  not a standing test, because it needs live data.
 - **Test fixtures are shaped, not recorded.** See
   `backend/tests/fixtures/README.md`. Re-record them during the spike.
+- **Migrations still run via the Postgres entrypoint**, so 002 only applies to
+  an empty data directory. Two migrations is where that stops being honest.

@@ -22,6 +22,12 @@ class PointOut(BaseModel):
     value: float
 
 
+class QuarantineOut(BaseModel):
+    date: date
+    rule: str
+    detail: str
+
+
 class SeriesOut(BaseModel):
     ticker: str
     requested: RangeOut
@@ -33,6 +39,13 @@ class SeriesOut(BaseModel):
     points: list[PointOut]
     warnings: list[str] = []
     fetched_ranges: list[RangeOut] = []
+    quarantined: list[QuarantineOut] = Field(
+        default=[],
+        description=(
+            "Bars that failed a soft validation rule. Stored and reported, "
+            "never silently dropped and never silently propagated."
+        ),
+    )
 
 
 class HealthOut(BaseModel):
@@ -40,3 +53,4 @@ class HealthOut(BaseModel):
     version: str
     provider: str
     storage: str
+    basis: str

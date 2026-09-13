@@ -11,13 +11,13 @@ from __future__ import annotations
 from sienner.config import get_settings
 from sienner.providers.fmp import FMPProvider
 from sienner.repository import (
-    BarRepository,
-    InMemoryBarRepository,
-    PostgresBarRepository,
+    InMemoryRepository,
+    PostgresRepository,
+    Repository,
 )
 from sienner.service import SeriesService
 
-_repository: BarRepository | None = None
+_repository: Repository | None = None
 _storage_kind = "uninitialised"
 
 
@@ -36,10 +36,10 @@ def init_storage() -> None:
             timeout=10.0,
         )
         pool.wait(timeout=10.0)
-        _repository = PostgresBarRepository(pool)
+        _repository = PostgresRepository(pool)
         _storage_kind = "postgres"
     except Exception as exc:  # noqa: BLE001
-        _repository = InMemoryBarRepository()
+        _repository = InMemoryRepository()
         _storage_kind = f"in-memory (postgres unavailable: {type(exc).__name__})"
 
 
@@ -47,7 +47,7 @@ def storage_kind() -> str:
     return _storage_kind
 
 
-def get_repository() -> BarRepository:
+def get_repository() -> Repository:
     global _repository
     if _repository is None:
         init_storage()

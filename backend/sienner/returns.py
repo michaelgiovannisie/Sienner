@@ -6,14 +6,12 @@
     k_t  split ratio effective on day t (1.0 if no split)
     D_t  cash dividend with ex-date t (0 if none)
 
-STAGE 1A STATUS: this is a stub. `actions` is always empty, so k_t = 1 and
-D_t = 0 and the expression reduces to a price return. The signature, the
-return shape, and every consumer above this module are already the Stage 1b
-ones. Filling in the actions join changes nothing downstream - that is the
-condition that makes the 1a/1b split cheap, and it is decided here rather
-than in 1b.
+STAGE 1B STATUS: the no-actions path is live and correct - with k = 1 and
+D = 0 the expression reduces to a price return, and both candidate conventions
+agree on it. The actions path is assembled up to apply_actions(), which
+refuses.
 
-    !!! KNOWN-OPEN, BLOCKS 1B !!!
+    !!! KNOWN-OPEN, THE ONE THING BLOCKING TOTAL RETURN !!!
     The formula above scales C_t by k_t but not D_t. That is only correct if
     D_t is quoted in PRE-split per-share units. If the provider quotes the
     dividend post-split - the likelier convention - the correct form is
@@ -28,8 +26,15 @@ from datetime import date
 
 import pandas as pd
 
+from sienner.config import Settings, get_settings
+
 RETURN_COLUMNS: tuple[str, ...] = ("bar_date", "ret")
-ACTION_COLUMNS: tuple[str, ...] = ("bar_date", "split_ratio", "cash_dividend")
+ACTION_COLUMNS: tuple[str, ...] = (
+    "ex_date",
+    "action_type",
+    "split_ratio",
+    "cash_dividend",
+)
 
 #: Basis labels. The API echoes one of these so the UI can never imply that a
 #: price return includes dividends. Stage 1b flips the value; the field, the
@@ -51,19 +56,20 @@ BASIS_DISCLAIMER = {
 
 
 def empty_actions() -> pd.DataFrame:
-    """A correctly-typed zero-row actions frame - what Stage 1a always passes."""
-    return pd.DataFrame(
-        {
-            "bar_date": pd.Series(dtype="object"),
-            "split_ratio": pd.Series(dtype="float64"),
-            "cash_dividend": pd.Series(dtype="float64"),
-        }
-    )
+    """A correctly-typed zero-row actions frame.
+
+    Re-exported from providers.base so callers that only import returns do not
+    need to reach past it for the empty case.
+    """
+    from sienner.providers.base import empty_corporate_actions
+
+    return empty_corporate_actions()
 
 
 def to_daily_returns(
     bars: pd.DataFrame,
     actions: pd.DataFrame | None = None,
+    settings: "Settings | None" = None,
 ) -> pd.DataFrame:
     """Compute the daily return series from raw bars and corporate actions.
 
@@ -79,24 +85,44 @@ def to_daily_returns(
     frame = frame.reset_index(drop=True)
 
     close = frame["close"].astype("float64")
-    k, cash = _action_vectors(frame["bar_date"], actions)
-
     prior_close = close.shift(1)
-    ret = (close * k + cash) / prior_close - 1.0
+
+    if actions is None or actions.empty:
+        # No actions to apply: k = 1, D = 0, and the expression reduces to a
+        # price return. Both candidate conventions agree here, so this path is
+        # not blocked on the spike.
+        ret = close / prior_close - 1.0
+    else:
+        k, cash = align_actions(frame["bar_date"], actions)
+        ret = apply_actions(
+            close,
+            prior_close,
+            k,
+            cash,
+            convention=(settings or get_settings()).dividend_unit_convention,
+        )
 
     out = pd.DataFrame({"bar_date": frame["bar_date"], "ret": ret})
     return out.iloc[1:].reset_index(drop=True)
 
 
-def _action_vectors(
+def align_actions(
     bar_dates: pd.Series,
     actions: pd.DataFrame | None,
 ) -> tuple[pd.Series, pd.Series]:
     """k_t and D_t aligned to bar_dates.
 
-    Stage 1a: `actions` is empty or None, so this returns the identity vectors
-    and the caller computes a price return. The alignment is written out rather
-    than short-circuited so that Stage 1b changes the caller, not the shape.
+    Mechanical and convention-free: this only says WHICH split ratio and WHICH
+    dividend land on each bar date. How they combine with the close is the open
+    question, and that lives in apply_actions().
+
+    k_t is the split ratio effective on day t, 1.0 if none. It is NOT a
+    cumulative product: r_t compares C_t to C_{t-1}, so only a split effective
+    on t itself is needed to put the two closes on one scale.
+
+    D_t is the total cash dividend with ex-date t, 0.0 if none. Multiple
+    dividends on one ex-date are summed - rare, but a special alongside a
+    regular does happen.
     """
     k = pd.Series(1.0, index=bar_dates.index, dtype="float64")
     cash = pd.Series(0.0, index=bar_dates.index, dtype="float64")
@@ -104,9 +130,64 @@ def _action_vectors(
     if actions is None or actions.empty:
         return k, cash
 
+    position = {day: index for index, day in bar_dates.items()}
+
+    for row in actions.to_dict("records"):
+        index = position.get(row["ex_date"])
+        if index is None:
+            # An action dated outside the bar window, or on a non-session day.
+            # Not this function's problem to report: validation covers it.
+            continue
+        if row.get("action_type") == "split" and pd.notna(row.get("split_ratio")):
+            k.at[index] *= float(row["split_ratio"])
+        elif row.get("action_type") == "cash_dividend" and pd.notna(
+            row.get("cash_dividend")
+        ):
+            cash.at[index] += float(row["cash_dividend"])
+
+    return k, cash
+
+
+def apply_actions(
+    close: pd.Series,
+    prior_close: pd.Series,
+    k: pd.Series,
+    cash: pd.Series,
+    *,
+    convention: str,
+) -> pd.Series:
+    """Combine closes, split ratios and dividends into a daily return.
+
+    ===================================================================
+    THIS IS THE ONE UNIMPLEMENTED FUNCTION IN STAGE 1B. Everything else
+    - schema, fetch, storage, validation, tests - is built around it.
+    ===================================================================
+
+    Two candidate expressions, differing only in whether the split ratio also
+    scales the dividend:
+
+        pre_split   r_t = (C_t * k_t + D_t) / C_{t-1} - 1
+        post_split  r_t = (C_t + D_t) * k_t / C_{t-1} - 1
+
+    They are identical on every ticker that did not split, and they diverge by
+    exactly the split factor on the ones that did - which is the failure mode
+    that is hardest to notice and worst to have. Guessing is not acceptable
+    here; that is the whole reason the README makes the spike a precondition.
+
+    To resolve: run
+
+        python -m sienner.scripts.fmp_spike --ticker NVDA --ticker AAPL
+
+    against a live key, then set SIENNER_DIVIDEND_UNIT_CONVENTION and implement
+    the matching branch. tests/test_actions.py already contains the tests that
+    will exercise it, marked strict-xfail, so they flip to passing - and the
+    strict marker fails the suite if they pass while still marked, which forces
+    the marker to come off deliberately.
+    """
     raise NotImplementedError(
-        "Corporate actions are Stage 1b. Resolve the dividend/split unit "
-        "question in the module docstring before implementing this."
+        "apply_actions is unimplemented pending the FMP field-semantics spike. "
+        f"convention={convention!r}. See the docstring, and README 'Spike "
+        "required before writing 1b'."
     )
 
 

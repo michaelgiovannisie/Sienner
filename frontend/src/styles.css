@@ -131,3 +131,32 @@ body {
   .controls input { min-width: 0; width: 100%; }
   .controls label { flex: 1 1 100%; }
 }
+
+.quarantine {
+  margin: 14px 0;
+  padding: 10px 14px;
+  background: #fff;
+  border: 1px solid var(--rule);
+  border-left: 3px solid #c98a20;
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+.quarantine summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.quarantine ul {
+  margin: 10px 0 4px;
+  padding-left: 20px;
+}
+
+.quarantine li { margin-bottom: 6px; }
+
+.quarantine code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  background: var(--paper);
+  padding: 1px 4px;
+  border-radius: 3px;
+}

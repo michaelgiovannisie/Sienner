@@ -16,5 +16,8 @@ vite.config.js.timestamp-*
 .env
 *.local
 
+# Spike output
+spike_verdict.json
+
 # OS
 .DS_Store

@@ -7,13 +7,23 @@ them changes a default rather than introducing a concept.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# The repo root, from this file: sienner/ -> backend/ -> repo root.
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 class Settings(BaseSettings):
+    # .env lives at the repo root, but commands get run from backend/ as often
+    # as from the root. A bare ".env" resolves against the CURRENT WORKING
+    # DIRECTORY, so running anything from backend/ silently found no file and
+    # reported the key as unset. Both locations are checked, root last so it
+    # wins on conflict.
     model_config = SettingsConfigDict(
         env_prefix="SIENNER_",
-        env_file=".env",
+        env_file=(".env", str(_REPO_ROOT / ".env")),
         env_file_encoding="utf-8",
         extra="ignore",
     )

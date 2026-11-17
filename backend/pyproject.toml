@@ -19,7 +19,6 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=8.3",
-    "pytest-asyncio>=0.24",
 ]
 
 [build-system]
@@ -31,9 +30,24 @@ include = ["sienner*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+# pytest-asyncio is NOT a dependency of this project - nothing here is async.
+# This option is set anyway because dropping a package from the dev extras does
+# not uninstall it: `pip install -e` never prunes, so a venv created before the
+# dependency was removed still loads the plugin. Unset, the plugin raises a
+# DeprecationWarning during pytest_configure, which the strict filterwarnings
+# below escalates into an INTERNALERROR that stops the entire suite from
+# running. Verified both ways: with the plugin absent pytest ignores this key,
+# and with it installed the suite runs clean.
+asyncio_default_fixture_loop_scope = "function"
 # A DeprecationWarning raised by Sienner's own code is a failure. Third-party
 # deprecations are ignored by exact message, so that a NEW one still surfaces
 # instead of being hidden behind a blanket ignore.
+#
+# Note the blast radius: a plugin that raises a DeprecationWarning during
+# pytest_configure turns into an INTERNALERROR and no tests run at all. If that
+# happens after adding a plugin, add its exact message here - do not widen this
+# to a blanket ignore, and do not remove the strictness.
 filterwarnings = [
     "error::DeprecationWarning",
     "ignore:The anyio.abc.BlockingPortal alias is deprecated:DeprecationWarning",

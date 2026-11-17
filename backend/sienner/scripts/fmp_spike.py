@@ -351,6 +351,15 @@ def main(argv: list[str] | None = None) -> int:
         except httpx.HTTPStatusError as exc:
             print(f"  HTTP {exc.response.status_code} - skipping")
             continue
+        except httpx.HTTPError as exc:
+            # Transport-level: DNS, TLS, a proxy refusing the host, no route.
+            # A traceback here tells you nothing you can act on.
+            print(f"  cannot reach the provider: {type(exc).__name__}: {exc}")
+            print(
+                "  This machine has no route to the FMP API. The spike has to run "
+                "somewhere that does."
+            )
+            continue
 
         print(
             f"  bars={len(data['bars'])} splits={len(data['splits'])} "

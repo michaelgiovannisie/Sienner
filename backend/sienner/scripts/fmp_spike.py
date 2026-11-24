@@ -87,22 +87,29 @@ def fetch_all(ticker: str, years: int) -> dict[str, pd.DataFrame]:
             "that is the entire point of it."
         )
     base = settings.fmp_base_url.rstrip("/")
-    key = {"apikey": settings.fmp_api_key}
     end = date.today()
     start = end - timedelta(days=365 * years)
 
+    def route(path: str) -> tuple[str, dict]:
+        """Same generation switch the adapter uses, so the spike probes the
+        routes the application will actually call."""
+        params = {"apikey": settings.fmp_api_key}
+        if settings.fmp_symbol_in_query:
+            params["symbol"] = ticker
+            return f"{base}{path}", params
+        return f"{base}{path}/{ticker}", params
+
     with httpx.Client() as client:
+        bar_url, bar_params = route(settings.fmp_historical_path)
         bars = _rows(
             _get(
                 client,
-                f"{base}{settings.fmp_historical_path}/{ticker}",
-                {**key, "from": start.isoformat(), "to": end.isoformat()},
+                bar_url,
+                {**bar_params, "from": start.isoformat(), "to": end.isoformat()},
             )
         )
-        splits = _rows(_get(client, f"{base}{settings.fmp_splits_path}/{ticker}", key))
-        dividends = _rows(
-            _get(client, f"{base}{settings.fmp_dividends_path}/{ticker}", key)
-        )
+        splits = _rows(_get(client, *route(settings.fmp_splits_path)))
+        dividends = _rows(_get(client, *route(settings.fmp_dividends_path)))
 
     def framed(rows: list[dict], date_field: str = "date") -> pd.DataFrame:
         if not rows:
@@ -121,12 +128,31 @@ def fetch_all(ticker: str, years: int) -> dict[str, pd.DataFrame]:
 def question_1(data: dict[str, pd.DataFrame], ticker: str) -> Finding:
     """adjClose: split-only, or split-and-dividend?"""
     bars, splits, dividends = data["bars"], data["splits"], data["dividends"]
-    if bars.empty or "adjClose" not in bars.columns:
+    if bars.empty:
         return Finding(
             "Does adjClose adjust for splits only, or splits and dividends?",
             VERDICT_UNRESOLVED,
             "none",
-            {"reason": "no adjClose field in the bar payload"},
+            {"reason": "no bars returned"},
+        )
+    if "adjClose" not in bars.columns:
+        # Not a failure to measure - a finding. The stable EOD route does not
+        # expose an adjusted close, so there is nothing to reconcile against
+        # and the question is moot. Sienner never consumed adjClose anyway; it
+        # was only ever a cross-check. The cross-check has to come from
+        # somewhere else, or go.
+        return Finding(
+            "Does adjClose adjust for splits only, or splits and dividends?",
+            "not_applicable_no_adjclose",
+            "high",
+            {
+                "ticker": ticker,
+                "bar_fields": sorted(bars.columns),
+                "note": (
+                    "This route exposes no adjusted close. The reconciliation "
+                    "test in the README cannot be written against it."
+                ),
+            },
         )
 
     # Split-only adjusted series: divide every close BEFORE a split by the
@@ -309,6 +335,13 @@ def recommend(findings: list[Finding]) -> str:
             "and a pay-dated dividend applied at the ex-date close is wrong "
             "regardless of which split convention you pick."
         )
+    if adj_dividend is None:
+        return (
+            "PARTIALLY RESOLVED. The ex-date is confirmed, but the "
+            "split-adjustment of adjDividend was not measurable - that needs a "
+            "ticker with both a split and dividends inside the window. Re-run "
+            "with --ticker AAPL --years 8 (4:1 split, Aug 2020)."
+        )
     if adj_dividend == "already_split_adjusted":
         return (
             "SIENNER_DIVIDEND_UNIT_CONVENTION=pre_split\n"
@@ -349,16 +382,22 @@ def main(argv: list[str] | None = None) -> int:
         try:
             data = fetch_all(ticker, args.years)
         except httpx.HTTPStatusError as exc:
-            print(f"  HTTP {exc.response.status_code} - skipping")
+            reason = f"HTTP {exc.response.status_code}: {exc.response.text[:160]}"
+            print(f"  {reason} - skipping")
+            # Record it. An empty results list with no reason in the file is
+            # useless to anyone reading it later, including me.
+            all_findings.append({"ticker": ticker, "error": reason, "findings": []})
             continue
         except httpx.HTTPError as exc:
             # Transport-level: DNS, TLS, a proxy refusing the host, no route.
             # A traceback here tells you nothing you can act on.
+            reason = f"unreachable: {type(exc).__name__}: {exc}"
             print(f"  cannot reach the provider: {type(exc).__name__}: {exc}")
             print(
                 "  This machine has no route to the FMP API. The spike has to run "
                 "somewhere that does."
             )
+            all_findings.append({"ticker": ticker, "error": reason, "findings": []})
             continue
 
         print(
@@ -380,6 +419,23 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     print(f"\n{'=' * 70}\nRECOMMENDATION\n{'=' * 70}")
+    if all(entry.get("error") for entry in all_findings) and all_findings:
+        print(
+            "NO DATA WAS FETCHED - every ticker failed. The errors are above and\n"
+            "now recorded in the verdict file. This is not a finding about FMP's\n"
+            "field semantics; it is a connectivity or endpoint problem.\n\n"
+            "Run the probe to find which routes your plan answers:\n"
+            "    python -m sienner.scripts.fmp_probe"
+        )
+        args.out.write_text(
+            json.dumps(
+                {"tickers": tickers, "results": all_findings,
+                 "recommendation": "no data fetched; see per-ticker errors"},
+                indent=2, default=str,
+            )
+        )
+        print(f"\nWritten to {args.out}")
+        return 1
     flattened = [
         Finding(**finding)
         for entry in all_findings

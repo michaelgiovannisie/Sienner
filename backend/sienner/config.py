@@ -31,8 +31,18 @@ class Settings(BaseSettings):
     # --- Provider ---
     fmp_api_key: str = ""
     fmp_base_url: str = "https://financialmodelingprep.com"
-    fmp_historical_path: str = "/api/v3/historical-price-full"
+
+    # The /stable/ generation. The /api/v3 and /api/v4 routes now answer
+    # 403 "Legacy Endpoint ... no longer supported", confirmed by
+    # sienner.scripts.fmp_probe against a live key.
+    fmp_historical_path: str = "/stable/historical-price-eod/full"
     provider_timeout_seconds: float = 30.0
+
+    # The stable generation takes the symbol as a query parameter; the legacy
+    # generation appended it to the path. One switch rather than three, because
+    # FMP is consistent within a generation. Re-run fmp_probe if routes change
+    # again.
+    fmp_symbol_in_query: bool = True
 
     # --- Database ---
     database_url: str = "postgresql://sienner:sienner@localhost:5432/sienner"
@@ -44,8 +54,8 @@ class Settings(BaseSettings):
     base_currency: str = "USD"
 
     # --- Provider: corporate action routes ---
-    fmp_splits_path: str = "/api/v3/historical-price-full/stock_split"
-    fmp_dividends_path: str = "/api/v3/historical-price-full/stock_dividend"
+    fmp_splits_path: str = "/stable/splits"
+    fmp_dividends_path: str = "/stable/dividends"
 
     # --- Return series ---
     # The standard total-return convention: dividends reinvested at the close on

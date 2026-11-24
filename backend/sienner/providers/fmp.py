@@ -38,9 +38,12 @@ from sienner.providers.base import (
     normalise_raw_bars,
 )
 
-#: Which provider field Sienner treats as the ex-date. Open spike question 2 is
-#: whether FMP's `date` on the dividend route is the ex-date or the pay-date.
-#: The assumption lives here, in one place, so the answer changes one line.
+#: Which provider field Sienner treats as the ex-date.
+#:
+#: Evidence (fmp_probe, live key): /stable/dividends returns `date` alongside
+#: separate `declarationDate`, `recordDate` and `paymentDate` fields. A payload
+#: that names the pay-date explicitly is not also using `date` for it, so `date`
+#: is the ex-date. The spike's price test confirms it independently.
 _EX_DATE_FIELD = "date"
 
 # FMP field name -> our column name.
@@ -75,15 +78,9 @@ class FMPProvider:
                 "SIENNER_FMP_API_KEY is not set; cannot reach the provider. "
                 "Cached ranges still work offline."
             )
-        payload = self._get(
-            f"{self._settings.fmp_historical_path}/{ticker.upper()}",
-            params={
-                "from": start.isoformat(),
-                "to": end.isoformat(),
-                "apikey": self._settings.fmp_api_key,
-            },
-            ticker=ticker,
-        )
+        path, params = self._route(self._settings.fmp_historical_path, ticker)
+        params.update({"from": start.isoformat(), "to": end.isoformat()})
+        payload = self._get(path, params=params, ticker=ticker)
         rows = self._unwrap(payload, ticker=ticker)
         if not rows:
             # An empty window is not an error: it may be a holiday stretch or a
@@ -94,6 +91,21 @@ class FMPProvider:
         return normalise_raw_bars(self._to_frame(rows, ticker=ticker), ticker=ticker)
 
     # -- internals ---------------------------------------------------------
+
+    def _route(self, path: str, ticker: str) -> tuple[str, dict[str, Any]]:
+        """Resolve a configured path and the symbol into (path, query params).
+
+        The stable generation takes ?symbol=AAPL; the legacy generation
+        appended /AAPL to the path. Keeping both means a future generation
+        change is a .env edit rather than a code change - which is the whole
+        reason this was a setting, and it paid for itself once already.
+        """
+        symbol = ticker.upper()
+        params: dict[str, Any] = {"apikey": self._settings.fmp_api_key}
+        if self._settings.fmp_symbol_in_query:
+            params["symbol"] = symbol
+            return path, params
+        return f"{path}/{symbol}", params
 
     def _get(self, path: str, *, params: dict[str, Any], ticker: str) -> Any:
         url = f"{self._settings.fmp_base_url.rstrip('/')}{path}"
@@ -207,11 +219,8 @@ class FMPProvider:
             raise ProviderError(
                 "SIENNER_FMP_API_KEY is not set; cannot reach the provider."
             )
-        payload = self._get(
-            f"{path}/{symbol}",
-            params={"apikey": self._settings.fmp_api_key},
-            ticker=symbol,
-        )
+        route, params = self._route(path, symbol)
+        payload = self._get(route, params=params, ticker=symbol)
         rows = self._unwrap(payload, ticker=symbol)
         if not rows:
             return empty_corporate_actions()

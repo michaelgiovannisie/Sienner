@@ -33,9 +33,10 @@ def test_health_reports_version_storage_and_basis(client):
     assert body["status"] == "ok"
     assert body["version"]
     assert body["storage"]
-    # While the spike is outstanding, health says so rather than implying the
-    # deployed tool is computing total returns.
-    assert "unresolved" in body["basis"]
+    # The spike is answered, so health reports the real basis. It said
+    # "unresolved" while the dividend-unit question was open, which is what
+    # kept the deployed tool from implying it computed total returns.
+    assert body["basis"] == "total_return"
 
 
 def test_series_returns_a_curve_indexed_to_100(client):
@@ -53,14 +54,18 @@ def test_series_returns_a_curve_indexed_to_100(client):
     assert body["total_return"] == pytest.approx(-0.01)
 
 
-def test_series_labels_its_basis_and_disclaims_dividends(client):
+def test_series_labels_its_basis_and_states_the_reinvestment_assumption(client):
+    """A total return rests on an assumption - dividends reinvested at the
+    ex-date close, no tax, no cash drag - that is wrong for a taxable account.
+    The response says so rather than leaving the number bare."""
     body = client.get(
         "/api/series",
         params={"ticker": "AAPL", "start": "2024-01-02", "end": "2024-01-04"},
     ).json()
 
-    assert body["basis"] == "price_return"
-    assert "dividends not included" in body["disclaimer"]
+    assert body["basis"] == "total_return"
+    assert "ex-date" in body["disclaimer"]
+    assert "taxable account" in body["disclaimer"]
 
 
 def test_out_of_universe_ticker_is_422_with_the_reason(client):

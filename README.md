@@ -215,6 +215,7 @@ Tests that matter here:
 
 - a known-split fixture (NVDA 10:1, June 2024)
 - reconciliation against FMP's own `adjClose` within tolerance
+  *(not possible: the /stable/ route exposes no adjClose — see Stage 1b status)*
 - a property test that appends a synthetic future split and asserts every historical
   daily return is byte-identical
 
@@ -277,7 +278,7 @@ loss, probability of hitting a target. Frontend: fan chart, outcome histogram.
 2. **VPS: reuse the existing box or provision a separate one?** Blocks 1a.
 3. **Default rebalance frequency in the UI.** Not needed until 1c.
 
-### Spike required before writing 1b
+### Spike required before writing 1b *(answered — see Stage 1b status below)*
 
 FMP's actual field semantics are not resolvable by discussion. Twenty minutes against
 the live key, answering:
@@ -320,66 +321,141 @@ uvicorn sienner.main:app --reload          # degrades to in-memory storage if
 cd frontend && npm install && npm run dev  # proxies /api to :8000
 ```
 
-## Stage 1b status
+## Stage 1b status: complete
 
-Built and tested: `corporate_actions` and `quarantine` tables, pandera schemas
-at every boundary, split and dividend fetch, the two-tier validation, the
-supersede correction path, and the spike script.
+`corporate_actions` and `quarantine` tables, pandera schemas at every boundary,
+split and dividend fetch, two-tier validation, the supersede correction path,
+and the total-return computation. 124 tests pass, 15 more against a real
+Postgres.
 
-**One function is unimplemented: `returns.apply_actions()`.** Everything else in
-1b is assembled around it. It refuses rather than guessing, because the
-dividend-unit question below is not answerable by reasoning:
+### The spike, answered
+
+Run against a live key on AAPL over 8 years, a window that spans the Aug 2020
+4:1 split. `python -m sienner.scripts.fmp_spike --ticker AAPL --years 8`.
+
+**Use `dividend`, not `adjDividend`.** `dividend / adjDividend = 4.0` for every
+dividend preceding the 4:1 split, so `dividend` is the as-declared historical
+per-share amount (~$0.82) and `adjDividend` is the same payment restated into
+present-day share terms (~$0.205). `daily_bars` holds raw, never-back-adjusted
+closes, so a 2019 bar is denominated in 2019 shares and the dividend must be
+too. Reading `adjDividend` here would divide the dividend by the cumulative
+split factor on exactly the tickers that split.
+
+**`date` on the dividend route is the ex-date.** The evidence is structural: the
+payload carries `recordDate` and `paymentDate` as separate fields that differ
+from `date`. A payload that names the pay-date explicitly is not also using
+`date` for it. The spike's price test — mean return on dividend dates versus all
+days — corroborates but does not establish: at n=32 against ~1.8% daily
+volatility, the −0.0019 gap sits inside one standard error. Worth knowing which
+half of that finding is load-bearing.
+
+**The `adjClose` question is moot.** `/stable/historical-price-eod/full` exposes
+no adjusted close, so the reconciliation test this README used to list cannot be
+written against it. Sienner never consumed `adjClose` — it was only ever a
+cross-check — and the NVDA golden-file test plus the immutability property test
+cover the same ground from first principles. Listed under what is still open in
+case a better cross-check is wanted later.
+
+### What the spike did *not* settle
+
+No AAPL date carries both a split and a dividend, so the per-share units of a
+dividend whose ex-date **coincides** with a split ex-date were never observed.
+That is the only case where the two conventions differ:
 
 ```
-pre_split    r_t = (C_t * k_t + D_t) / C_{t-1} - 1
-post_split   r_t = (C_t + D_t) * k_t / C_{t-1} - 1
+pre_split    r_t = (C_t·k_t + D_t) / C_{t-1} − 1      D per pre-split share
+post_split   r_t = (C_t + D_t)·k_t / C_{t-1} − 1      D per post-split share
 ```
 
-These agree on every ticker that never split and diverge by the split factor on
-the ones that did. To resolve:
+They are not competing theories. Hold one pre-split share into a k-for-1 split:
+it becomes k shares worth C_t each, and if the dividend is quoted per post-split
+share you receive k·D_post. Since `D_pre = k · D_post`, both lines are the same
+equation in different dividend units. On every date with no split, k = 1 and they
+are algebraically identical — which is every date the spike examined.
 
-```bash
-cd backend && python -m sienner.scripts.fmp_spike --ticker NVDA --ticker AAPL --ticker KO
-```
+Both are implemented, `pre_split` is the default, and
+`validation.RULE_ACTION_COINCIDENCE` flags any date carrying both so the
+untested case surfaces for review instead of being computed silently under an
+assumption nobody checked. If it ever fires, look up that dividend's declaration
+and confirm which share count it was declared against. Do not trust the default
+there.
 
-The script answers all three README spike questions from data rather than
-documentation, prints its reasoning, writes `spike_verdict.json`, and ends with
-the `SIENNER_DIVIDEND_UNIT_CONVENTION` value to set. Then implement the matching
-branch in `apply_actions()`. The tests are already written: `tests/test_actions.py`
-marks them `xfail(strict=True)`, so they flip to passing and the strict marker
-fails the suite until someone removes it deliberately.
+### FMP's routes moved
 
-Until the convention is set, the API keeps serving a **price return** and says
-so in `/api/health`, in the `basis` field, and in a per-request warning when
-actions exist but are not applied. Storing the actions was never the blocker;
-the arithmetic is.
+The `/api/v3` and `/api/v4` routes now answer `403 Legacy Endpoint`. The
+`/stable/` generation replaces them and takes the symbol as a query parameter
+rather than a path segment. `sienner.scripts.fmp_probe` discovers this against a
+live key and names the settings to change; `fmp_symbol_in_query` switches the
+adapter between generations, and both URL shapes are pinned by tests so the next
+move fails the suite instead of producing an empty result file.
 
 ### Two decisions that changed during 1b
 
 **`r_t` is immutable against future actions, not against corrections.** A
 late-announced dividend or a restated ratio is a real event. `corporate_actions`
-therefore carries a supersede chain: a correction inserts the new row and marks
-the old one superseded, never edits in place. "Active" is keyed on
-`superseded_at`, not `superseded_by`, because a partial unique index cannot be
-deferred and keying it the other way deadlocks the correction against itself.
-That bug passed every in-memory test and was caught only against real Postgres;
-`tests/test_postgres_integration.py` now covers it.
+carries a supersede chain: a correction inserts the new row and marks the old one
+superseded, never edits in place. "Active" is keyed on `superseded_at`, not
+`superseded_by`, because a partial unique index cannot be deferred and keying it
+the other way deadlocks the correction against itself. That bug passed every
+in-memory test and was caught only against real Postgres.
 
 **The quarantine threshold grew a second rule.** At `|log return| > 0.5` (a
 64.9% move), a missed 2:1 split is −0.693 and trips it, but a missed 3:2 is
 −0.405 and passes clean — and a missed split is the most likely way for a return
-series to be wrong. So a move whose size matches a common split ratio, on a date
-with no corporate action on file, is now its own rule. The "no action on file"
-condition is what keeps the false-positive rate usable.
+series to be wrong. A move whose size matches a common split ratio, on a date
+with no corporate action on file, is now its own rule.
 
-### What is still not built
+---
+
+## Running it
+
+```bash
+cp .env.example .env          # set POSTGRES_PASSWORD and SIENNER_FMP_API_KEY
+docker compose up --build     # http://localhost
+```
+
+Caddy is the only published port; the backend is reachable at `backend:8000`
+inside the Compose network and nowhere else.
+
+Without containers:
+
+```bash
+./scripts/run_spike.sh        # builds the venv, installs, runs the suite,
+                              # then runs the spike
+```
+
+That script exists because macOS ships Python 3.9 and Sienner needs 3.10+, and
+because the pip bundled with 3.9 cannot do a PEP 660 editable install. It finds a
+usable interpreter, rebuilds `.venv` if needed, and fails with instructions
+rather than three steps later.
+
+```bash
+cd backend && pytest          # 124 pass, 13 skip without Postgres
+uvicorn sienner.main:app --reload
+cd frontend && npm install && npm run dev
+```
+
+Integration tests need a database:
+
+```bash
+SIENNER_TEST_DATABASE_URL=postgresql://sienner:<pw>@localhost:5432/sienner pytest
+```
+
+## What is still open
 
 - **Universe check is shape-only.** `sienner/universe.py` cannot tell `BRK.B`
   from `VOD.L` without an exchange lookup, so it allowlists US class suffixes
   and rejects the rest. The `securities` table replaces this.
-- **Reconciliation against `adjClose`** exists inside the spike script but is
-  not a standing test, because it needs live data.
+- **No cross-check against an independent total-return series.** The `adjClose`
+  reconciliation is not available on this route. The property test and the NVDA
+  golden file cover the arithmetic; nothing yet checks it against a second
+  source.
 - **Test fixtures are shaped, not recorded.** See
-  `backend/tests/fixtures/README.md`. Re-record them during the spike.
-- **Migrations still run via the Postgres entrypoint**, so 002 only applies to
-  an empty data directory. Two migrations is where that stops being honest.
+  `backend/tests/fixtures/README.md`.
+- **Migrations run via the Postgres entrypoint**, so they apply only to an empty
+  data directory. 003 exists because 002 was edited in place for fresh
+  databases; three migrations is where this stops being honest and wants a real
+  runner.
+- **Open question 1 from the original plan** — FMP rate limits and whether bulk
+  endpoints exist — is still unanswered, and still decides whether inline
+  cache-miss fetch is tolerable at scale.

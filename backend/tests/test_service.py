@@ -168,7 +168,7 @@ def test_curve_is_indexed_to_base_at_the_effective_start(settings):
 
     assert result.points[0].value == pytest.approx(100.0)
     assert result.points[0].bar_date == result.effective.start
-    assert result.basis == "price_return"
+    assert result.basis == "total_return"
 
 
 def test_out_of_universe_ticker_is_rejected_before_any_fetch(settings):
@@ -218,13 +218,14 @@ def test_actions_are_fetched_and_stored_alongside_bars(settings):
     assert float(stored["split_ratio"].iloc[0]) == 2.0
 
 
-def test_unresolved_convention_keeps_the_tool_working_and_says_why(settings):
-    """The spike gate. Storing actions is not the blocker; the arithmetic is.
-    The deployed tool must keep answering, as a price return, and must not
-    imply it is doing anything else."""
+def test_unresolved_convention_keeps_the_tool_working_and_says_why():
+    """The fallback, which outlives the spike: if the convention is ever reset,
+    the deployed tool must keep answering as a price return and must not imply
+    it is doing anything else."""
     bars = make_bars([100.0, 110.0, 99.0])
     actions = _split_action(date(2024, 1, 3), 2.0)
-    _, _, service = build(bars, settings=settings, actions=actions)
+    unresolved = Settings(fmp_api_key="test-key", dividend_unit_convention="unresolved")
+    _, _, service = build(bars, settings=unresolved, actions=actions)
 
     result = service.get_series("AAPL", date(2024, 1, 2), date(2024, 1, 4))
 
@@ -233,17 +234,18 @@ def test_unresolved_convention_keeps_the_tool_working_and_says_why(settings):
     assert any("spike" in w for w in result.warnings)
 
 
-def test_resolved_convention_attempts_total_return(settings):
-    """With the convention set, the service stops hedging and calls the real
-    path - which raises until apply_actions() is written. That is the intended
-    failure: it is loud, and it is the only thing left."""
+def test_resolved_convention_produces_a_total_return(settings):
+    """The default now the spike is answered: actions are applied, the basis
+    says total_return, and no warning hedges it."""
     bars = make_bars([100.0, 110.0, 99.0])
     actions = _split_action(date(2024, 1, 3), 2.0)
-    resolved = Settings(fmp_api_key="k", dividend_unit_convention="pre_split")
-    _, _, service = build(bars, settings=resolved, actions=actions)
+    _, _, service = build(bars, settings=settings, actions=actions)
 
-    with pytest.raises(NotImplementedError):
-        service.get_series("AAPL", date(2024, 1, 2), date(2024, 1, 4))
+    result = service.get_series("AAPL", date(2024, 1, 2), date(2024, 1, 4))
+
+    assert result.basis == "total_return"
+    assert "ex-date" in result.disclaimer, "the reinvestment assumption is stated"
+    assert not any("NOT applied" in w for w in result.warnings)
 
 
 def test_quarantined_bars_are_surfaced_and_stored(settings):

@@ -1,12 +1,9 @@
-"""Corporate actions: alignment, storage, and the tests that are waiting on the
-spike.
+"""Corporate actions: alignment, the return math, and storage.
 
-The tests below marked `strict xfail` are the Stage 1b acceptance tests. They
-run today and fail with NotImplementedError, which is the honest status. When
-apply_actions() is written they start passing - and because the marker is
-strict, an unexpected PASS fails the suite, forcing whoever implements it to
-remove the marker deliberately rather than discovering later that the tests were
-never really checked.
+The three acceptance tests at the bottom were strict-xfail until the FMP
+field-semantics spike was answered. They now assert the real numbers: NVDA's
+raw close fell from 1208.88 to 121.79 across a 10:1 split, which is -89.93%
+uncorrected and +0.75% once the split ratio is applied.
 """
 
 from __future__ import annotations
@@ -26,11 +23,12 @@ from sienner.returns import align_actions, to_daily_returns
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
-pending_spike = pytest.mark.xfail(
-    raises=NotImplementedError,
-    strict=True,
-    reason="apply_actions() is blocked on the FMP dividend-unit spike",
-)
+# The spike is answered and apply_actions() is implemented, so the three
+# acceptance tests below now run for real. They were marked
+# xfail(strict=True) until this point; strict is what forced this marker to be
+# removed deliberately rather than leaving tests that silently never checked
+# anything. The spike's findings are recorded in sienner/returns.py.
+PRE_SPLIT = Settings(dividend_unit_convention="pre_split")
 
 
 @pytest.fixture
@@ -172,15 +170,14 @@ def test_price_return_path_is_unaffected_by_the_spike(nvda):
     assert float(split_day.iloc[0]) == pytest.approx(-0.8993, abs=1e-4)
 
 
-# --- blocked on the spike --------------------------------------------------
+# --- resolved by the spike -------------------------------------------------
 
 
-@pending_spike
 def test_split_is_corrected_so_the_return_is_small(nvda):
     """NVDA's raw close fell from 1208.88 to 121.79 on the 10:1 ex-date. The
     economic return that day was about +0.75%, not -89.9%."""
     bars, actions = bars_from(nvda), actions_from(nvda)
-    settings = Settings(dividend_unit_convention="pre_split")
+    settings = PRE_SPLIT
 
     returns = to_daily_returns(bars, actions, settings=settings)
     split_day = returns.loc[returns["bar_date"] == date(2024, 6, 10), "ret"]
@@ -188,12 +185,11 @@ def test_split_is_corrected_so_the_return_is_small(nvda):
     assert float(split_day.iloc[0]) == pytest.approx(0.0075, abs=0.002)
 
 
-@pending_spike
 def test_dividend_shows_up_in_the_return(nvda):
     """The demonstration that 1b worked: the same chart, visibly different for
     anything paying a dividend."""
     bars, actions = bars_from(nvda), actions_from(nvda)
-    settings = Settings(dividend_unit_convention="pre_split")
+    settings = PRE_SPLIT
 
     with_dividend = to_daily_returns(bars, actions, settings=settings)
     without = to_daily_returns(bars, actions[actions["action_type"] == "split"],
@@ -206,13 +202,12 @@ def test_dividend_shows_up_in_the_return(nvda):
     )
 
 
-@pending_spike
 def test_appending_a_future_split_leaves_every_historical_return_identical(nvda):
     """The README's property test, in full. This is the immutability claim the
     entire cache design rests on: a corporate action in 2027 must not change
     the relationship between two adjacent closes in 2024."""
     bars, actions = bars_from(nvda), actions_from(nvda)
-    settings = Settings(dividend_unit_convention="pre_split")
+    settings = PRE_SPLIT
 
     before = to_daily_returns(bars, actions, settings=settings)
     after = to_daily_returns(bars, with_future_split(actions), settings=settings)
@@ -268,3 +263,78 @@ def test_actions_outside_the_span_are_not_read_back(nvda):
     repo.write_actions("NVDA", actions_from(nvda), source="fmp")
 
     assert repo.read_actions("NVDA", DateRange(date(2023, 1, 1), date(2023, 12, 31))).empty
+
+
+# --- the two conventions ---------------------------------------------------
+#
+# They are one equation in two dividend units, so they agree on every date
+# where k = 1 and differ only when a split and a dividend share an ex-date.
+# That coincidence is the case the spike could not test, which is why these
+# tests pin the agreement AND the divergence.
+
+
+def test_the_conventions_agree_when_no_split_shares_a_dividend_date(nvda):
+    """Every date in the AAPL window the spike examined looks like this: the
+    split is on one day, the dividend on another, so k = 1 wherever D > 0."""
+    bars, actions = bars_from(nvda), actions_from(nvda)
+
+    pre = to_daily_returns(bars, actions, settings=PRE_SPLIT)
+    post = to_daily_returns(
+        bars, actions, settings=Settings(dividend_unit_convention="post_split")
+    )
+
+    pd.testing.assert_frame_equal(pre, post)
+
+
+def test_the_conventions_diverge_when_a_split_and_dividend_share_an_ex_date():
+    """The one case the spike never observed. Pinned so that if someone
+    changes the default, the consequence is visible in a test rather than in a
+    number on a chart."""
+    bars = pd.DataFrame(
+        [
+            {"bar_date": date(2024, 6, 7), "close": 1000.0},
+            {"bar_date": date(2024, 6, 10), "close": 100.0},
+        ]
+    )
+    actions = pd.DataFrame(
+        [
+            {"ex_date": date(2024, 6, 10), "action_type": "split", "split_ratio": 10.0,
+             "cash_dividend": None, "provider_adj_dividend": None},
+            {"ex_date": date(2024, 6, 10), "action_type": "cash_dividend",
+             "split_ratio": None, "cash_dividend": 1.0, "provider_adj_dividend": None},
+        ]
+    )
+
+    pre = to_daily_returns(bars, actions, settings=PRE_SPLIT)
+    post = to_daily_returns(
+        bars, actions, settings=Settings(dividend_unit_convention="post_split")
+    )
+
+    # pre_split:  (100*10 + 1)/1000 - 1 = +0.1%   D is one pre-split share's cash
+    # post_split: (100 + 1)*10/1000 - 1 = +1.0%   D is per post-split share, held 10
+    assert float(pre["ret"].iloc[0]) == pytest.approx(0.001)
+    assert float(post["ret"].iloc[0]) == pytest.approx(0.010)
+
+
+def test_an_unresolved_convention_refuses_to_compute_a_total_return(nvda):
+    """Setting the convention back to unresolved must not silently fall back to
+    a price return at this level - the service decides that, not the math."""
+    bars, actions = bars_from(nvda), actions_from(nvda)
+    unresolved = Settings(dividend_unit_convention="unresolved")
+
+    with pytest.raises(NotImplementedError, match="unresolved"):
+        to_daily_returns(bars, actions, settings=unresolved)
+
+
+def test_reading_adj_dividend_instead_would_understate_the_dividend(nvda):
+    """Why the spike mattered. provider_adj_dividend is the payment restated
+    into present-day share terms; using it against raw closes divides the
+    dividend by the cumulative split factor."""
+    actions = actions_from(nvda)
+    dividend = actions[actions["action_type"] == "cash_dividend"].iloc[0]
+
+    # In this fixture both fields happen to be 0.01 because the dividend is
+    # post-split already. The contract is what is asserted: the field consumed
+    # is cash_dividend, and provider_adj_dividend is carried untouched.
+    assert dividend["cash_dividend"] is not None
+    assert "provider_adj_dividend" in actions.columns

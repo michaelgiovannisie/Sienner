@@ -71,9 +71,15 @@ class Settings(BaseSettings):
     # (C_t + D_t) * k_t, and getting it backwards is quietly wrong on exactly
     # the tickers that split.
     #
-    # Not guessable. Run `python -m sienner.scripts.fmp_spike` against a live
-    # key, then set this to the answer. Until then apply_actions() refuses.
-    dividend_unit_convention: str = "unresolved"  # pre_split | post_split
+    # RESOLVED by the spike (AAPL, 8 years, spans the Aug 2020 4:1 split):
+    # FMP's `dividend` is the as-declared historical per-share amount, and
+    # daily_bars holds raw never-back-adjusted closes, so both sides of the
+    # return ratio are in the same era's share units. See apply_actions.
+    #
+    # Still unobserved: a dividend ex-date falling ON a split ex-date, the only
+    # case where the two conventions differ. validation flags it rather than
+    # trusting this default there.
+    dividend_unit_convention: str = "pre_split"  # pre_split | post_split
 
     # --- Validation, tier 2: quarantine and report ---
     # A single-day |log return| above this is either bad data or a real event.

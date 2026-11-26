@@ -14,6 +14,7 @@ import pytest
 from sienner.config import Settings
 from sienner.validation import (
     RULE_ABS_LOG_RETURN,
+    RULE_ACTION_COINCIDENCE,
     RULE_CALENDAR_GAP,
     RULE_SPLIT_SHAPED_MOVE,
     detect,
@@ -172,3 +173,56 @@ def test_to_frame_is_empty_but_typed_when_nothing_fired():
     assert list(frame.columns) == [
         "ticker", "bar_date", "rule", "detail", "observed_value", "threshold",
     ]
+
+
+# --- action coincidence ----------------------------------------------------
+
+
+def test_a_split_and_dividend_sharing_an_ex_date_is_flagged(settings):
+    """The one case the dividend-unit spike could not test, because no AAPL
+    date carries both. Flagged rather than silently computed."""
+    series = returns([(date(2024, 6, 10), 0.0075)])
+    actions = pd.DataFrame(
+        [
+            {"ex_date": date(2024, 6, 10), "action_type": "split", "split_ratio": 10.0,
+             "cash_dividend": None, "provider_adj_dividend": None},
+            {"ex_date": date(2024, 6, 10), "action_type": "cash_dividend",
+             "split_ratio": None, "cash_dividend": 0.01, "provider_adj_dividend": 0.01},
+        ]
+    )
+    flags = detect(series, ticker="NVDA", actions=actions, settings=settings)
+
+    assert RULE_ACTION_COINCIDENCE in rules_for(flags, date(2024, 6, 10))
+
+
+def test_actions_on_different_dates_are_not_flagged(settings):
+    """The normal case, and the only case the spike observed."""
+    series = returns([(date(2024, 6, 10), 0.0075), (date(2024, 6, 11), -0.007)])
+    actions = pd.DataFrame(
+        [
+            {"ex_date": date(2024, 6, 10), "action_type": "split", "split_ratio": 10.0,
+             "cash_dividend": None, "provider_adj_dividend": None},
+            {"ex_date": date(2024, 6, 11), "action_type": "cash_dividend",
+             "split_ratio": None, "cash_dividend": 0.01, "provider_adj_dividend": 0.01},
+        ]
+    )
+    flags = detect(series, ticker="NVDA", actions=actions, settings=settings)
+
+    assert not [f for f in flags if f.rule == RULE_ACTION_COINCIDENCE]
+
+
+def test_a_coincidence_outside_the_return_window_is_not_flagged(settings):
+    """Only dates actually in the series matter; an action in some other year
+    is not a problem with this result."""
+    series = returns([(date(2024, 6, 10), 0.01)])
+    actions = pd.DataFrame(
+        [
+            {"ex_date": date(2019, 1, 2), "action_type": "split", "split_ratio": 2.0,
+             "cash_dividend": None, "provider_adj_dividend": None},
+            {"ex_date": date(2019, 1, 2), "action_type": "cash_dividend",
+             "split_ratio": None, "cash_dividend": 0.5, "provider_adj_dividend": 0.5},
+        ]
+    )
+    flags = detect(series, ticker="T", actions=actions, settings=settings)
+
+    assert not [f for f in flags if f.rule == RULE_ACTION_COINCIDENCE]

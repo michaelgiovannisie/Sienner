@@ -130,7 +130,9 @@ CREATE TABLE IF NOT EXISTS quarantine (
     CONSTRAINT quarantine_rule_known CHECK (rule IN (
         'abs_log_return',      -- generic outlier
         'split_shaped_move',   -- move matches a common split ratio, no action on file
-        'calendar_gap'         -- gap the trading calendar does not explain
+        'calendar_gap',        -- gap the trading calendar does not explain
+        'action_coincidence'   -- a split and a dividend share an ex-date: the one
+                               -- case the dividend-unit spike could not test
     ))
 );
 

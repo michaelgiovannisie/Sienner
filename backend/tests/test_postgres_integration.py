@@ -225,3 +225,39 @@ def test_unknown_rule_is_refused(repo):
     )
     with pytest.raises(Exception):
         repo.write_quarantine(flags)
+
+
+def test_the_action_coincidence_rule_is_accepted(repo):
+    """Added in migration 003. A rule name the CHECK constraint does not know
+    is refused, so a new rule in Python without a migration fails here rather
+    than at the first real flag."""
+    flags = pd.DataFrame(
+        [{"ticker": "NVDA", "bar_date": date(2024, 6, 10), "rule": "action_coincidence",
+          "detail": "split and dividend share this ex-date",
+          "observed_value": None, "threshold": None}]
+    )
+    assert repo.write_quarantine(flags) == 1
+
+    stored = repo.read_quarantine("NVDA", DateRange(date(2024, 6, 1), date(2024, 6, 30)))
+    assert stored["rule"].tolist() == ["action_coincidence"]
+
+
+def test_every_rule_the_code_can_emit_is_allowed_by_the_schema(repo):
+    """The schema and sienner.validation must not drift. This fails if someone
+    adds a rule constant without a migration."""
+    from sienner import validation
+
+    rules = [
+        getattr(validation, name)
+        for name in dir(validation)
+        if name.startswith("RULE_")
+    ]
+    assert rules, "no rule constants found"
+
+    for index, rule in enumerate(rules):
+        flags = pd.DataFrame(
+            [{"ticker": "T", "bar_date": date(2024, 1, 2 + index), "rule": rule,
+              "detail": f"schema check for {rule}",
+              "observed_value": None, "threshold": None}]
+        )
+        assert repo.write_quarantine(flags) == 1, f"schema rejects rule {rule!r}"

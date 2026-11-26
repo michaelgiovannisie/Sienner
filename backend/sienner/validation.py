@@ -28,6 +28,7 @@ from sienner.config import Settings, get_settings
 RULE_ABS_LOG_RETURN = "abs_log_return"
 RULE_SPLIT_SHAPED_MOVE = "split_shaped_move"
 RULE_CALENDAR_GAP = "calendar_gap"
+RULE_ACTION_COINCIDENCE = "action_coincidence"
 
 
 @dataclass(frozen=True)
@@ -69,6 +70,7 @@ def detect(
         _split_shaped_move(returns, ticker=ticker, actions=actions, settings=settings)
     )
     flags.extend(_calendar_gaps(returns, ticker=ticker, settings=settings))
+    flags.extend(_action_coincidence(returns, ticker=ticker, actions=actions))
     return flags
 
 
@@ -177,6 +179,52 @@ def _action_dates(actions: pd.DataFrame | None) -> set[date]:
     if actions is None or actions.empty or "ex_date" not in actions.columns:
         return set()
     return set(actions["ex_date"].tolist())
+
+
+def _action_coincidence(
+    returns: pd.DataFrame,
+    *,
+    ticker: str,
+    actions: pd.DataFrame | None,
+) -> list[QuarantineFlag]:
+    """A split and a cash dividend sharing an ex-date.
+
+    This is the one case the field-semantics spike could not test: no AAPL date
+    carries both, so the per-share units of the dividend on a split date were
+    never observed. It is also the ONLY case where the two dividend-unit
+    conventions produce different numbers - everywhere else k = 1 and the two
+    forms are algebraically identical.
+
+    So the return for such a date is computed under an assumption that has not
+    been checked against data. Rather than let that pass silently on a number
+    someone might act on, it is flagged. If this ever fires, the fix is to look
+    up that specific dividend's declaration and confirm which share count it
+    was declared against - not to trust the default.
+    """
+    if actions is None or actions.empty or "action_type" not in actions.columns:
+        return []
+
+    splits = set(actions.loc[actions["action_type"] == "split", "ex_date"])
+    dividends = set(actions.loc[actions["action_type"] == "cash_dividend", "ex_date"])
+    both = splits & dividends
+    if not both:
+        return []
+
+    in_series = set(returns["bar_date"])
+    return [
+        QuarantineFlag(
+            ticker=ticker,
+            bar_date=day,
+            rule=RULE_ACTION_COINCIDENCE,
+            detail=(
+                "a split and a cash dividend share this ex-date, which is the "
+                "one case the dividend-unit spike could not test; the return "
+                "for this day rests on an unverified assumption about which "
+                "share count the dividend was declared against"
+            ),
+        )
+        for day in sorted(both & in_series)
+    ]
 
 
 def _calendar_gaps(

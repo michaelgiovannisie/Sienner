@@ -93,13 +93,19 @@ def test_stage_1a_ignores_dividends_and_says_so(bars_factory):
     assert "ex-date" in BASIS_DISCLAIMER[BASIS_TOTAL_RETURN]
 
 
-def test_passing_actions_refuses_rather_than_silently_ignoring(bars_factory):
-    """Handing this function real corporate actions in Stage 1a must fail loudly.
-    Silently dropping them would produce a wrong number that looks right."""
+def test_passing_actions_changes_the_result_rather_than_being_ignored(bars_factory):
+    """Silently dropping corporate actions would produce a wrong number that
+    looks right. This asserts they are applied.
+
+    A 10:1 split on the third bar: the raw close falls from 110 to 99, which is
+    -10% uncorrected. With k = 10 applied it is 99*10/110 - 1 = +800%, because
+    these synthetic closes are not split-shaped. The magnitude is not the point
+    - the point is that the two numbers differ."""
+    bars = bars_factory([100.0, 110.0, 99.0])
     actions = pd.DataFrame(
         [
             {
-                "ex_date": date(2024, 1, 3),
+                "ex_date": bars["bar_date"].iloc[2],
                 "action_type": "split",
                 "split_ratio": 10.0,
                 "cash_dividend": None,
@@ -107,8 +113,36 @@ def test_passing_actions_refuses_rather_than_silently_ignoring(bars_factory):
             }
         ]
     )
-    with pytest.raises(NotImplementedError):
-        to_daily_returns(bars_factory([100.0, 110.0, 99.0]), actions)
+
+    without = to_daily_returns(bars)
+    with_actions = to_daily_returns(bars, actions)
+
+    assert float(without["ret"].iloc[-1]) == pytest.approx(-0.10)
+    assert float(with_actions["ret"].iloc[-1]) == pytest.approx(8.0)
+
+
+def test_an_unresolved_convention_refuses_rather_than_guessing(bars_factory):
+    """If the convention is ever reset to unresolved, the math must refuse. The
+    service decides whether to fall back to a price return; this layer does
+    not get to guess."""
+    from sienner.config import Settings
+
+    bars = bars_factory([100.0, 110.0, 99.0])
+    actions = pd.DataFrame(
+        [
+            {
+                "ex_date": bars["bar_date"].iloc[2],
+                "action_type": "split",
+                "split_ratio": 10.0,
+                "cash_dividend": None,
+                "provider_adj_dividend": None,
+            }
+        ]
+    )
+    with pytest.raises(NotImplementedError, match="unresolved"):
+        to_daily_returns(
+            bars, actions, settings=Settings(dividend_unit_convention="unresolved")
+        )
 
 
 def test_empty_actions_is_the_stage_1a_path(bars_factory):

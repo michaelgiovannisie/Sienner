@@ -6,18 +6,31 @@
     k_t  split ratio effective on day t (1.0 if no split)
     D_t  cash dividend with ex-date t (0 if none)
 
-STAGE 1B STATUS: the no-actions path is live and correct - with k = 1 and
-D = 0 the expression reduces to a price return, and both candidate conventions
-agree on it. The actions path is assembled up to apply_actions(), which
-refuses.
+STAGE 1B STATUS: implemented. The spike (sienner.scripts.fmp_spike, run
+against a live key on AAPL over 8 years, which spans the Aug 2020 4:1 split)
+settled the two questions this module depended on:
 
-    !!! KNOWN-OPEN, THE ONE THING BLOCKING TOTAL RETURN !!!
-    The formula above scales C_t by k_t but not D_t. That is only correct if
-    D_t is quoted in PRE-split per-share units. If the provider quotes the
-    dividend post-split - the likelier convention - the correct form is
-    (C_t + D_t) * k_t, and applying it the wrong way is quietly wrong on
-    exactly the tickers that split. Resolve with the README's spike before
-    implementing apply_actions(); do not guess.
+  * `dividend` is the AS-DECLARED historical per-share amount; `adjDividend`
+    is the same payment restated into present-day share terms. Evidence:
+    dividend / adjDividend = 4.0 for every dividend preceding the 4:1 split.
+    Since daily_bars holds RAW closes that are never back-adjusted, a 2019 bar
+    is denominated in 2019 shares - so D_t must be `dividend`. Reading
+    adjDividend here would divide the dividend by the cumulative split factor
+    on exactly the tickers that split.
+
+  * `date` on the dividend route is the EX-date. The evidence is structural:
+    the payload carries recordDate and paymentDate as separate fields that
+    differ from `date`. (The spike also ran a price test - mean return on
+    dividend dates vs all days - but with n=32 that gap sits inside one
+    standard error, so it corroborates and does not establish.)
+
+    !!! WHAT THE SPIKE DID NOT SETTLE !!!
+    No AAPL date carries both a split and a dividend, so the units of `D_t`
+    when an ex-date COINCIDES with a split ex-date were never observed. That
+    is the only case where the two conventions below differ. Rather than
+    assume, validation.detect() flags any such date
+    (RULE_ACTION_COINCIDENCE) so it surfaces for review instead of being
+    computed silently under an untested assumption.
 """
 
 from __future__ import annotations
@@ -41,6 +54,12 @@ ACTION_COLUMNS: tuple[str, ...] = (
 #: consumer, and the UI element all already exist.
 BASIS_PRICE_RETURN = "price_return"
 BASIS_TOTAL_RETURN = "total_return"
+
+#: Which per-share units the provider quotes a cash dividend in. See
+#: apply_actions: these select between two forms of one equation.
+CONVENTION_PRE_SPLIT = "pre_split"
+CONVENTION_POST_SPLIT = "post_split"
+CONVENTION_UNRESOLVED = "unresolved"
 
 BASIS_DISCLAIMER = {
     BASIS_PRICE_RETURN: (
@@ -158,36 +177,42 @@ def apply_actions(
 ) -> pd.Series:
     """Combine closes, split ratios and dividends into a daily return.
 
-    ===================================================================
-    THIS IS THE ONE UNIMPLEMENTED FUNCTION IN STAGE 1B. Everything else
-    - schema, fetch, storage, validation, tests - is built around it.
-    ===================================================================
+    The two conventions are ONE equation written in two dividend units, not two
+    competing theories. Derive it and that becomes obvious.
 
-    Two candidate expressions, differing only in whether the split ratio also
-    scales the dividend:
+    Hold one pre-split share into day t, where a k-for-1 split takes effect.
+    The share becomes k post-split shares, each closing at C_t, so the position
+    is worth k * C_t. If the dividend is quoted per POST-split share you
+    receive k * D_post in cash:
 
-        pre_split   r_t = (C_t * k_t + D_t) / C_{t-1} - 1
-        post_split  r_t = (C_t + D_t) * k_t / C_{t-1} - 1
+        r_t = (k*C_t + k*D_post) / C_{t-1} - 1 = (C_t + D_post) * k_t / C_{t-1} - 1
 
-    They are identical on every ticker that did not split, and they diverge by
-    exactly the split factor on the ones that did - which is the failure mode
-    that is hardest to notice and worst to have. Guessing is not acceptable
-    here; that is the whole reason the README makes the spike a precondition.
+    If it is quoted per PRE-split share you receive D_pre once, and since
+    D_pre = k * D_post:
 
-    To resolve: run
+        r_t = (k*C_t + D_pre) / C_{t-1} - 1 = (C_t * k_t + D_t) / C_{t-1} - 1
 
-        python -m sienner.scripts.fmp_spike --ticker NVDA --ticker AAPL
+    Both are implemented because the setting exists and the distinction is
+    real. The default is pre_split: FMP's `dividend` is the as-declared
+    historical amount, and the stored closes are raw, so both sides of the
+    ratio are in the same era's share units.
 
-    against a live key, then set SIENNER_DIVIDEND_UNIT_CONVENTION and implement
-    the matching branch. tests/test_actions.py already contains the tests that
-    will exercise it, marked strict-xfail, so they flip to passing - and the
-    strict marker fails the suite if they pass while still marked, which forces
-    the marker to come off deliberately.
+    On every date with no split (k = 1) the two forms are algebraically
+    identical, which is every date in the AAPL window the spike examined. The
+    coincidence case is flagged by validation rather than assumed - see the
+    module docstring.
     """
+    if convention == CONVENTION_PRE_SPLIT:
+        return (close * k + cash) / prior_close - 1.0
+    if convention == CONVENTION_POST_SPLIT:
+        return (close + cash) * k / prior_close - 1.0
+
     raise NotImplementedError(
-        "apply_actions is unimplemented pending the FMP field-semantics spike. "
-        f"convention={convention!r}. See the docstring, and README 'Spike "
-        "required before writing 1b'."
+        "The dividend unit convention is unresolved, so a total return cannot "
+        f"be computed (convention={convention!r}). Run "
+        "`python -m sienner.scripts.fmp_spike --ticker AAPL --years 8` against "
+        "a live key and set SIENNER_DIVIDEND_UNIT_CONVENTION to pre_split or "
+        "post_split."
     )
 
 
